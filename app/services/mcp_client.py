@@ -6,6 +6,8 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from app.utils.validators import ensure_protocol
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -80,24 +82,40 @@ class UniversityClient:
 
     async def get_departments(self, university_url: str) -> list[dict]:
         """Get departments from university."""
-        result = await call_mcp_tool(self.SERVER_SCRIPT, "get_departments", {"university_url": university_url})
+        normalized_university_url = ensure_protocol(university_url)
+        result = await call_mcp_tool(
+            self.SERVER_SCRIPT,
+            "get_departments",
+            {"university_url": normalized_university_url},
+        )
         return result if isinstance(result, list) else []
 
     async def get_faculty(self, department_url: str) -> list[dict]:
         """Get faculty from department."""
-        result = await call_mcp_tool(self.SERVER_SCRIPT, "get_faculty", {"department_url": department_url})
+        normalized_department_url = ensure_protocol(department_url)
+        result = await call_mcp_tool(
+            self.SERVER_SCRIPT,
+            "get_faculty",
+            {"department_url": normalized_department_url},
+        )
         return result if isinstance(result, list) else []
 
     async def get_professor_page(self, professor_url: str) -> dict:
         """Get professor details."""
-        return await call_mcp_tool(self.SERVER_SCRIPT, "get_professor_page", {"professor_url": professor_url})
+        normalized_professor_url = ensure_protocol(professor_url)
+        return await call_mcp_tool(
+            self.SERVER_SCRIPT,
+            "get_professor_page",
+            {"professor_url": normalized_professor_url},
+        )
 
     async def search_faculty(self, university_url: str, research_area: str) -> list[dict] | dict:
         """Search faculty by research area."""
+        normalized_university_url = ensure_protocol(university_url)
         result = await call_mcp_tool(
             self.SERVER_SCRIPT,
             "search_faculty",
-            {"university_url": university_url, "research_area": research_area},
+            {"university_url": normalized_university_url, "research_area": research_area},
         )
         return result if isinstance(result, list) else result
 

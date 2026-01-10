@@ -23,19 +23,55 @@ def get_gemini() -> genai.Client:
 
 async def fetch_page(url: str) -> str:
     """Fetch webpage content."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+    }
+    
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        resp = await client.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+        resp = await client.get(url, timeout=30, headers=headers)
         resp.raise_for_status()
         return resp.text
 
 
-def extract_text_from_html(html: str) -> str:
-    """Basic HTML to text extraction."""
+def extract_text_from_html(html: str, base_url: str = "") -> str:
+    """extract text and links from HTML."""
     text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    
+    def replace_link(match):
+        href = match.group(1)
+        content = match.group(2)
+        # Clean content
+        content = re.sub(r'<[^>]+>', '', content).strip()
+        
+        # Resolve relative URLs if base_url is provided
+        if base_url and not href.startswith(('http', 'https', 'mailto:', 'tel:')):
+            if href.startswith('/'):
+                # Handle root-relative
+                from urllib.parse import urlparse
+                parsed = urlparse(base_url)
+                href = f"{parsed.scheme}://{parsed.netloc}{href}"
+            else:
+                # Handle relative
+                href = f"{base_url.rstrip('/')}/{href}"
+                
+        return f" [{content}]({href}) "
+
+    text = re.sub(r'<a\s+[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>', replace_link, text, flags=re.DOTALL | re.IGNORECASE)
+    
+    # Remove remaining tags
     text = re.sub(r'<[^>]+>', ' ', text)
     text = re.sub(r'\s+', ' ', text)
-    return text[:15000]
+    return text[:25000]
 
 
 async def llm_extract(prompt: str, content: str) -> str:
@@ -49,11 +85,13 @@ async def llm_extract(prompt: str, content: str) -> str:
 async def find_faculty_directory(university_url: str) -> str | None:
     """Find faculty/people directory link on university page."""
     html = await fetch_page(university_url)
-    text = extract_text_from_html(html)
+    text = extract_text_from_html(html, base_url=university_url)
 
     prompt = """Find the URL to the faculty directory, people page, or faculty listing on this university website.
+The text contains '[Link Text](URL)' formatted links.
 Look for links containing words like: faculty, people, directory, staff, professors, team, members.
-Return ONLY the full URL, nothing else. If not found, return "NOT_FOUND"."""
+Prefer links that look like directories (e.g. /faculty/, /people/).
+Return ONLY the full absolute URL, nothing else. If not found, return "NOT_FOUND"."""
 
     result = await llm_extract(prompt, f"Base URL: {university_url}\n\n{text}")
     result = result.strip()
@@ -64,7 +102,7 @@ Return ONLY the full URL, nothing else. If not found, return "NOT_FOUND"."""
 
 async def extract_faculty_list(page_url: str) -> list[dict]:
     """Extract faculty members from a page."""
-    html = await fetch_page(page_url)
+    html = await fetch_page(page_url)    
     text = extract_text_from_html(html)
 
     prompt = """Extract all faculty/professor information from this page.
@@ -73,11 +111,14 @@ Return as JSON array with objects having keys: name, title, department, email, p
 Only include actual faculty members, not staff or students."""
 
     result = await llm_extract(prompt, f"Page URL: {page_url}\n\n{text}")
-
+        
     try:
-        json_match = re.search(r'\[.*\]', result, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group())
+        result = result.replace('```json', '').replace('```', '').strip() 
+        start = result.find('[')
+        end = result.rfind(']') + 1
+        if start != -1 and end != -1:
+            json_str = result[start:end]
+            return json.loads(json_str)
     except json.JSONDecodeError:
         pass
     return []
