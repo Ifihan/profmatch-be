@@ -5,14 +5,13 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 
-logging.basicConfig(level=logging.INFO)
-
 from app.config import settings
 from app.routes import match, professor, session, upload
 from app.services.database import close_db, init_db
 from app.services.mcp_client import DocumentClient, ScholarClient, UniversityClient, server_manager
 from app.services.redis import close_redis
 
+logging.basicConfig(level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
