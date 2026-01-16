@@ -10,13 +10,22 @@ logging.basicConfig(level=logging.INFO)
 from app.config import settings
 from app.routes import match, professor, session, upload
 from app.services.database import close_db, init_db
+from app.services.mcp_client import DocumentClient, ScholarClient, UniversityClient, server_manager
 from app.services.redis import close_redis
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    
+    # Start persistent MCP servers
+    await server_manager.start_server(UniversityClient.SERVER_SCRIPT)
+    await server_manager.start_server(ScholarClient.SERVER_SCRIPT)
+    await server_manager.start_server(DocumentClient.SERVER_SCRIPT)
+    
     yield
+    
+    await server_manager.close_all()
     await close_redis()
     await close_db()
 
