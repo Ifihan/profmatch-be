@@ -156,6 +156,11 @@ class UniversityClient:
         )
         return result if isinstance(result, list) else result
 
+    async def search_web(self, query: str) -> list[str]:
+        """Search the web for a URL."""
+        result = await server_manager.call_tool(self.SERVER_SCRIPT, "search_web", {"query": query})
+        return result if isinstance(result, list) else []
+
 
 class DocumentClient:
     """Client for Document MCP server."""

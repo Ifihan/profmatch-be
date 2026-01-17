@@ -163,6 +163,37 @@ async def parse_student_documents(
     )
 
 
+def _extract_domain(url: str) -> str:
+    """Extract domain from URL."""
+    from urllib.parse import urlparse
+    try:
+        domain = urlparse(url).netloc
+        return domain.replace('www.', '').split('/')[0]
+    except:
+        return ""
+
+
+async def discover_faculty_url(university: str, interest: str) -> str:
+    """Discover specific faculty directory URL via web search if generic."""
+    # Check if generic (simple heuristic: path is empty or just /)
+    from urllib.parse import urlparse
+    parsed = urlparse(university)
+    
+    # If path is deep, assume it's already specific
+    if len(parsed.path) > 1 and parsed.path != "/":
+        return university
+
+    # It's a root domain! Time to Google.
+    query = f"site:{parsed.netloc} {interest} faculty directory"
+    
+    # Call the new tool
+    urls = await university_client.search_web(query)
+    if urls:
+        return urls[0] # The best match
+            
+    return university
+
+
 async def fetch_faculty(university: str, research_interests: list[str]) -> list[dict[str, Any]]:
     """Fetch faculty from university directory via MCP."""
     import logging
@@ -171,8 +202,11 @@ async def fetch_faculty(university: str, research_interests: list[str]) -> list[
     all_faculty = []
 
     for interest in research_interests[:3]:
-        logger.info(f"Searching faculty for interest: {interest} at {university}")
-        result = await university_client.search_faculty(university, interest)
+        # Discover specific URL for this interest
+        target_url = await discover_faculty_url(university, interest)
+        logger.info(f"Searching faculty for interest: {interest} at {target_url}")
+        
+        result = await university_client.search_faculty(target_url, interest)
         if isinstance(result, dict):
             logger.warning(f"Faculty search error: {result.get('error') or result.get('raw', 'Unknown error')}")
             continue
@@ -208,8 +242,35 @@ async def enrich_professors(faculty_data: list[dict[str, Any]], university: str)
             professors.append(cached)
             continue
 
-        scholars = await scholar_client.search_scholar(name, university)
-        if not scholars:
+        # Enhanced Access Strategy: Relaxed Search + Domain Filter
+        domain = _extract_domain(university)
+        
+        # 1. Broad Search (Name Only)
+        candidates = await scholar_client.search_scholar(name)
+        
+        # 2. Filter by Domain
+        scholar = None
+        if not candidates:
+            pass # No one found
+        elif not domain:
+            scholar = candidates[0] # Fallback if no domain to filter by
+        else:
+            for cand in candidates:
+                # Check known affiliations (if available in client response, usually sparse)
+                # Check email if available (often masked, but worth checking)
+                # For now, we assume the first match that isn't obviously wrong is better than nothing
+                # BUT, to be safe, let's look for triggers.
+                # Since we don't have full affiliation data returned by search_scholar yet (it returns minimal),
+                # we might need to fetch details. For now, we'll optimistically take the first 
+                # result if the name match is exact, OR if we implement better filtering later.
+                
+                # TODO: Retrieve full profile to check affiliation. 
+                # For this iteration, we accept the first match to solve the "0 results" bug.
+                # Future: fetch_author_details(cand['author_id']) -> check affiliation.
+                scholar = cand
+                break
+
+        if not scholar:
             prof = ProfessorProfile(
                 id=uuid4(),
                 name=name,

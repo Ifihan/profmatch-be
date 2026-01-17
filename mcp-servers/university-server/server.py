@@ -193,6 +193,17 @@ async def list_tools() -> list[Tool]:
                 "required": ["university_url", "research_area"],
             },
         ),
+        Tool(
+            name="search_web",
+            description="Perform a Google Search to find URLs",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query to find a URL"},
+                },
+                "required": ["query"],
+            },
+        ),
     ]
 
 
@@ -245,6 +256,31 @@ Focus on academic/research departments like Computer Science, Engineering, etc."
             filtered = faculty[:20]
 
         return [TextContent(type="text", text=json.dumps(filtered))]
+
+    elif name == "search_web":
+        client = get_gemini()
+        # Use Google Search tool for grounding
+        # Note: Ensure the model supports google_search tool (e.g. gemini-2.0-flash-exp)
+        # We try with the configured model first.
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.0-flash-exp", 
+                contents=f"Find the URL for: {arguments['query']}. Return ONLY the URL.",
+                config={
+                    'tools': [{'google_search': {}}]
+                }
+            )
+            # Extracted URL should be in the text response or grounding metadata
+            # For simplicity we take the text response which should be the URL per prompt
+            url = response.text.strip() if response.text else ""
+            
+            # Simple validation
+            if url and url.startswith("http"):
+                 return [TextContent(type="text", text=json.dumps([url]))]
+            return [TextContent(type="text", text=json.dumps([]))]
+            
+        except Exception as e:
+            return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
 
     return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
 
