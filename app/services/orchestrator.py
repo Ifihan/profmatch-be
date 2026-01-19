@@ -2,11 +2,18 @@ import json
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
+from urllib.parse import urlparse
 
 from app.models import CitationMetrics, Education, Experience, MatchResult, ProfessorProfile, Publication, StudentProfile
 from app.services.cache import cache_professor, get_cached_professor
 from app.services.gemini import generate_text
-from app.services.mcp_client import document_client, scholar_client, university_client
+from app.services.mcp_client import (
+    server_manager, 
+    university_client, 
+    scholar_client, 
+    document_client,
+    search_client
+)
 from app.services.redis import get_session, set_session
 from app.utils.storage import get_file_path
 
@@ -27,6 +34,11 @@ async def run_matching(
     file_ids: list[str] | None = None,
 ) -> list[MatchResult]:
     """Run the full matching pipeline."""
+    # Ensure all MCP servers are started
+    await server_manager.start_server(university_client.SERVER_SCRIPT)
+    await server_manager.start_server(scholar_client.SERVER_SCRIPT)
+    await server_manager.start_server(search_client.SERVER_SCRIPT)
+
     await update_progress(session_id, 5, "Parsing uploaded documents")
 
     student_profile = None
@@ -173,25 +185,30 @@ def _extract_domain(url: str) -> str:
         return ""
 
 
-async def discover_faculty_url(university: str, interest: str) -> str:
-    """Discover specific faculty directory URL via web search if generic."""
-    # Check if generic (simple heuristic: path is empty or just /)
-    from urllib.parse import urlparse
+async def discover_faculty_url(university: str, interest: str) -> list[str]:
+    """Discover specific faculty directory URL(s) via web search if generic."""
+    if not university.startswith(('http://', 'https://')):
+        university = 'https://' + university
     parsed = urlparse(university)
-    
-    # If path is deep, assume it's already specific
-    if len(parsed.path) > 1 and parsed.path != "/":
-        return university
 
-    # It's a root domain! Time to Google.
-    query = f"site:{parsed.netloc} {interest} faculty directory"
+    path = parsed.path.lower()
+    explicit_keywords = ['faculty', 'staff', 'people', 'directory', 'team', 'professors']
     
-    # Call the new tool
-    urls = await university_client.search_web(query)
+    if any(k in path for k in explicit_keywords):
+        return [university]
+
+    # If it's a root domain OR a generic department page (e.g. /coe/), we Google.
+    # Use the base domain (e.g. ttu.edu instead of www.ttu.edu) to catch subdomains (depts.ttu.edu)
+    domain = parsed.netloc.replace('www.', '')
+    query = f"Computer Science faculty directory {domain}"
+    if interest:
+         query = f"{interest} faculty directory {domain}"
+    
+    urls = await search_client.search_web(query)
     if urls:
-        return urls[0] # The best match
+        return urls # Return ALL discovered URLs
             
-    return university
+    return [university]
 
 
 async def fetch_faculty(university: str, research_interests: list[str]) -> list[dict[str, Any]]:
@@ -202,20 +219,22 @@ async def fetch_faculty(university: str, research_interests: list[str]) -> list[
     all_faculty = []
 
     for interest in research_interests[:3]:
-        # Discover specific URL for this interest
-        target_url = await discover_faculty_url(university, interest)
-        logger.info(f"Searching faculty for interest: {interest} at {target_url}")
+        target_urls = await discover_faculty_url(university, interest)
         
-        result = await university_client.search_faculty(target_url, interest)
-        if isinstance(result, dict):
-            logger.warning(f"Faculty search error: {result.get('error') or result.get('raw', 'Unknown error')}")
-            continue
-        if not isinstance(result, list):
-            logger.warning(f"Unexpected result type: {type(result)}")
-            continue
-        faculty_dicts = [f for f in result if isinstance(f, dict) and f.get("name")]
-        logger.info(f"Found {len(faculty_dicts)} faculty members")
-        all_faculty.extend(faculty_dicts)
+        for url in target_urls:
+            logger.info(f"Searching faculty for interest: {interest} at {url}")
+            
+            result = await university_client.search_faculty(url, interest)
+            if isinstance(result, dict):
+                logger.warning(f"Faculty search error at {url}: {result.get('error') or result.get('raw', 'Unknown error')}")
+                continue
+            if not isinstance(result, list):
+                logger.warning(f"Unexpected result type at {url}: {type(result)}")
+                continue
+            
+            faculty_dicts = [f for f in result if isinstance(f, dict) and f.get("name")]
+            logger.info(f"Found {len(faculty_dicts)} faculty members at {url}")
+            all_faculty.extend(faculty_dicts)
 
     seen_names = set()
     unique_faculty = []
@@ -251,24 +270,36 @@ async def enrich_professors(faculty_data: list[dict[str, Any]], university: str)
         # 2. Filter by Domain
         scholar = None
         if not candidates:
-            pass # No one found
-        elif not domain:
-            scholar = candidates[0] # Fallback if no domain to filter by
+            # No results found for this name
+            pass
         else:
+            # Extract keywords from domain (e.g., 'wits' from 'wits.ac.za')
+            # Heuristic: split by dot, ignore common suffixes/prefixes
+            parts = domain.lower().split('.')
+            ignore = {'www', 'ac', 'za', 'edu', 'uk', 'us', 'com', 'org', 'net', 'depts', 'dept'}
+            keywords = [p for p in parts if p not in ignore and len(p) > 2]
+            
+            # Try to find a specific match based on affiliation
+            match_found = False
             for cand in candidates:
-                # Check known affiliations (if available in client response, usually sparse)
-                # Check email if available (often masked, but worth checking)
-                # For now, we assume the first match that isn't obviously wrong is better than nothing
-                # BUT, to be safe, let's look for triggers.
-                # Since we don't have full affiliation data returned by search_scholar yet (it returns minimal),
-                # we might need to fetch details. For now, we'll optimistically take the first 
-                # result if the name match is exact, OR if we implement better filtering later.
+                affiliations = cand.get('affiliations', [])
+                if not affiliations:
+                    continue
                 
-                # TODO: Retrieve full profile to check affiliation. 
-                # For this iteration, we accept the first match to solve the "0 results" bug.
-                # Future: fetch_author_details(cand['author_id']) -> check affiliation.
-                scholar = cand
-                break
+                # Check if any keyword appears in any affiliation string
+                for aff in affiliations:
+                    aff_lower = aff.lower()
+                    if any(k in aff_lower for k in keywords):
+                        scholar = cand
+                        match_found = True
+                        break
+                if match_found:
+                    break
+            
+            # Fallback: If no affiliation match found, take the first result (Relaxed Search)
+            # This solves the "0 matches" issue where affiliation data might be missing or mismatched
+            if not scholar and candidates:
+                scholar = candidates[0]
 
         if not scholar:
             prof = ProfessorProfile(
@@ -285,7 +316,6 @@ async def enrich_professors(faculty_data: list[dict[str, Any]], university: str)
             professors.append(prof)
             continue
 
-        scholar = scholars[0]
         scholar_id = scholar.get("author_id")
 
         pubs_data = await scholar_client.get_publications(scholar_id) if scholar_id else []
