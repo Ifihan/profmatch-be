@@ -34,6 +34,7 @@ class MCPServerManager:
         env = {
             **os.environ, 
             "GEMINI_API_KEY": settings.gemini_api_key,
+            "TAVILY_API_KEY": settings.tavily_api_key,
             "PYTHONUNBUFFERED": "1"
         }
         
@@ -157,6 +158,16 @@ class UniversityClient:
         return result if isinstance(result, list) else result
 
 
+class SearchClient:
+    """Client for Search MCP server."""
+    SERVER_SCRIPT = "mcp-servers/search-server/server.py"
+
+    async def search_web(self, query: str) -> list[str]:
+        """Search the web for URLs."""
+        result = await server_manager.call_tool(self.SERVER_SCRIPT, "search_web", {"query": query})
+        return result if isinstance(result, list) else []
+
+
 class DocumentClient:
     """Client for Document MCP server."""
     SERVER_SCRIPT = "mcp-servers/document-server/server.py"
@@ -178,4 +189,5 @@ class DocumentClient:
 
 scholar_client = ScholarClient()
 university_client = UniversityClient()
+search_client = SearchClient()
 document_client = DocumentClient()

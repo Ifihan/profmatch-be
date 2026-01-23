@@ -235,9 +235,9 @@ Focus on academic/research departments like Computer Science, Engineering, etc."
         research_area = arguments["research_area"].lower()
         filtered = []
         for f in faculty:
-            name = f.get("name", "").lower()
-            title = f.get("title", "").lower()
-            dept = f.get("department", "").lower()
+            name = (f.get("name") or "").lower()
+            title = (f.get("title") or "").lower()
+            dept = (f.get("department") or "").lower()
             if research_area in name or research_area in title or research_area in dept:
                 filtered.append(f)
 
@@ -245,6 +245,8 @@ Focus on academic/research departments like Computer Science, Engineering, etc."
             filtered = faculty[:20]
 
         return [TextContent(type="text", text=json.dumps(filtered))]
+
+    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
 
     return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
 

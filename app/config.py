@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     session_ttl_hours: int = 24
 
     gemini_api_key: str = ""
+    tavily_api_key: str = ""
 
     class Config:
         env_file = ".env"

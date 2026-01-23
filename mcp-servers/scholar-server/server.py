@@ -37,7 +37,7 @@ async def search_author(name: str, affiliation: str | None = None) -> list[dict]
         query = f"{name} {affiliation}" if affiliation else name
         resp = await client.get(
             f"{SEMANTIC_SCHOLAR_API}/author/search",
-            params={"query": query, "limit": 5},
+            params={"query": query, "limit": 5, "fields": "name,affiliations,paperCount,citationCount,hIndex"},
             timeout=30,
         )
         resp.raise_for_status()
