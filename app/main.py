@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -15,15 +16,25 @@ logging.basicConfig(level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()
-    
-    # Start persistent MCP servers
-    await server_manager.start_server(UniversityClient.SERVER_SCRIPT)
-    await server_manager.start_server(ScholarClient.SERVER_SCRIPT)
-    await server_manager.start_server(DocumentClient.SERVER_SCRIPT)
-    
+    # Initialize database (non-blocking on failure)
+    try:
+        await init_db()
+    except Exception as e:
+        logging.error(f"Database init failed: {e}")
+
+    # Start MCP servers in background task to not block startup
+    async def start_mcp_servers():
+        for script in [UniversityClient.SERVER_SCRIPT, ScholarClient.SERVER_SCRIPT, DocumentClient.SERVER_SCRIPT]:
+            try:
+                await server_manager.start_server(script)
+                logging.info(f"Started MCP server: {script}")
+            except Exception as e:
+                logging.error(f"Failed to start MCP server {script}: {e}")
+
+    asyncio.create_task(start_mcp_servers())
+
     yield
-    
+
     await server_manager.close_all()
     await close_redis()
     await close_db()
