@@ -63,7 +63,7 @@ async def llm_extract(prompt: str, content: str) -> str:
     """Use Gemini to extract structured data."""
     client = get_gemini()
     full_prompt = f"{prompt}\n\nDocument Content:\n{content[:12000]}"
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=full_prompt)
+    response = client.models.generate_content(model="gemini-3-flash-preview", contents=full_prompt)
     return response.text or ""
 
 
