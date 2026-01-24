@@ -167,6 +167,15 @@ class SearchClient:
         result = await server_manager.call_tool(self.SERVER_SCRIPT, "search_web", {"query": query})
         return result if isinstance(result, list) else []
 
+    async def find_google_scholar_url(self, professor_name: str, university: str) -> str | None:
+        """Search for a professor's Google Scholar profile URL."""
+        query = f'"{professor_name}" {university} site:scholar.google.com'
+        urls = await self.search_web(query)
+        for url in urls:
+            if "scholar.google.com" in url and "user=" in url:
+                return url
+        return None
+
 
 class DocumentClient:
     """Client for Document MCP server."""

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime
 from typing import Any
@@ -247,116 +248,147 @@ async def fetch_faculty(university: str, research_interests: list[str]) -> list[
     return unique_faculty[:30]
 
 
-async def enrich_professors(faculty_data: list[dict[str, Any]], university: str) -> list[ProfessorProfile]:
-    """Enrich professor profiles with publication data via MCP."""
-    professors = []
+async def enrich_single_professor(
+    faculty: dict[str, Any],
+    university: str,
+    domain: str,
+    domain_keywords: list[str],
+) -> ProfessorProfile | None:
+    """Enrich a single professor profile with publication data."""
+    name = faculty.get("name", "")
+    if not name:
+        return None
 
-    for faculty in faculty_data:
-        name = faculty.get("name", "")
-        if not name:
-            continue
+    cached = await get_cached_professor(name, university)
+    if cached:
+        return cached
 
-        cached = await get_cached_professor(name, university)
-        if cached:
-            professors.append(cached)
-            continue
+    # Run Semantic Scholar search and Google Scholar URL search concurrently
+    scholar_task = scholar_client.search_scholar(name)
+    google_scholar_task = search_client.find_google_scholar_url(name, domain)
 
-        # Enhanced Access Strategy: Relaxed Search + Domain Filter
-        domain = _extract_domain(university)
-        
-        # 1. Broad Search (Name Only)
-        candidates = await scholar_client.search_scholar(name)
-        
-        # 2. Filter by Domain
-        scholar = None
-        if not candidates:
-            # No results found for this name
-            pass
-        else:
-            # Extract keywords from domain (e.g., 'wits' from 'wits.ac.za')
-            # Heuristic: split by dot, ignore common suffixes/prefixes
-            parts = domain.lower().split('.')
-            ignore = {'www', 'ac', 'za', 'edu', 'uk', 'us', 'com', 'org', 'net', 'depts', 'dept'}
-            keywords = [p for p in parts if p not in ignore and len(p) > 2]
-            
-            # Try to find a specific match based on affiliation
-            match_found = False
-            for cand in candidates:
-                affiliations = cand.get('affiliations', [])
-                if not affiliations:
-                    continue
-                
-                # Check if any keyword appears in any affiliation string
-                for aff in affiliations:
-                    aff_lower = aff.lower()
-                    if any(k in aff_lower for k in keywords):
-                        scholar = cand
-                        match_found = True
-                        break
-                if match_found:
+    candidates, google_scholar_url = await asyncio.gather(scholar_task, google_scholar_task)
+
+    # Filter by Domain
+    scholar = None
+    if candidates:
+        for cand in candidates:
+            affiliations = cand.get('affiliations', [])
+            if not affiliations:
+                continue
+            for aff in affiliations:
+                aff_lower = aff.lower()
+                if any(k in aff_lower for k in domain_keywords):
+                    scholar = cand
                     break
-            
-            # Fallback: If no affiliation match found, take the first result (Relaxed Search)
-            # This solves the "0 matches" issue where affiliation data might be missing or mismatched
-            if not scholar and candidates:
-                scholar = candidates[0]
+            if scholar:
+                break
 
         if not scholar:
-            prof = ProfessorProfile(
-                id=uuid4(),
-                name=name,
-                title=faculty.get("title"),
-                department=faculty.get("department"),
-                university=university,
-                email=faculty.get("email"),
-                research_areas=[],
-                publications=[],
-                last_updated=datetime.utcnow(),
-            )
-            professors.append(prof)
-            continue
+            scholar = candidates[0]
 
-        scholar_id = scholar.get("author_id")
+    # If no scholar found, try to enrich from profile page
+    if not scholar:
+        profile_url = faculty.get("profile_url")
+        extra_data = {}
+        if profile_url:
+            try:
+                extra_data = await university_client.get_professor_page(profile_url)
+            except Exception:
+                pass
 
-        pubs_data = await scholar_client.get_publications(scholar_id) if scholar_id else []
-        metrics_data = await scholar_client.get_citation_metrics(scholar_id) if scholar_id else {}
-
-        publications = [
-            Publication(
-                title=p.get("title", ""),
-                authors=p.get("authors", []),
-                year=p.get("year", 0),
-                venue=p.get("venue"),
-                abstract=p.get("abstract"),
-                citation_count=p.get("citation_count", 0),
-                url=p.get("url"),
-            )
-            for p in pubs_data
-        ]
-
-        citation_metrics = CitationMetrics(
-            h_index=metrics_data.get("h_index", 0),
-            total_citations=metrics_data.get("total_citations", 0),
-        )
-
-        research_areas = extract_research_areas(publications)
+        research_areas = extra_data.get("research_areas") or []
+        if isinstance(research_areas, str):
+            research_areas = [r.strip() for r in research_areas.split(",") if r.strip()]
 
         prof = ProfessorProfile(
             id=uuid4(),
             name=name,
-            title=faculty.get("title"),
-            department=faculty.get("department"),
+            title=faculty.get("title") or extra_data.get("title"),
+            department=faculty.get("department") or extra_data.get("department"),
             university=university,
-            email=faculty.get("email"),
-            scholar_id=scholar_id,
+            email=faculty.get("email") or extra_data.get("email"),
+            google_scholar_url=google_scholar_url,
             research_areas=research_areas,
-            publications=publications,
-            citation_metrics=citation_metrics,
+            publications=[],
             last_updated=datetime.utcnow(),
         )
-
         await cache_professor(prof)
-        professors.append(prof)
+        return prof
+
+    scholar_id = scholar.get("author_id")
+
+    # Fetch publications and metrics concurrently
+    tasks_to_run = []
+    if scholar_id:
+        tasks_to_run.append(scholar_client.get_publications(scholar_id))
+        tasks_to_run.append(scholar_client.get_citation_metrics(scholar_id))
+
+    if tasks_to_run:
+        pubs_data, metrics_data = await asyncio.gather(*tasks_to_run)
+    else:
+        pubs_data, metrics_data = [], {}
+
+    publications = [
+        Publication(
+            title=p.get("title", ""),
+            authors=p.get("authors", []),
+            year=p.get("year", 0),
+            venue=p.get("venue"),
+            abstract=p.get("abstract"),
+            citation_count=p.get("citation_count", 0),
+            url=p.get("url"),
+        )
+        for p in pubs_data
+    ]
+
+    citation_metrics = CitationMetrics(
+        h_index=metrics_data.get("h_index", 0),
+        total_citations=metrics_data.get("total_citations", 0),
+    )
+
+    research_areas = extract_research_areas(publications)
+
+    prof = ProfessorProfile(
+        id=uuid4(),
+        name=name,
+        title=faculty.get("title"),
+        department=faculty.get("department"),
+        university=university,
+        email=faculty.get("email"),
+        scholar_id=scholar_id,
+        google_scholar_url=google_scholar_url,
+        research_areas=research_areas,
+        publications=publications,
+        citation_metrics=citation_metrics,
+        last_updated=datetime.utcnow(),
+    )
+
+    await cache_professor(prof)
+    return prof
+
+
+async def enrich_professors(faculty_data: list[dict[str, Any]], university: str) -> list[ProfessorProfile]:
+    """Enrich professor profiles with publication data via MCP (concurrent)."""
+    domain = _extract_domain(university)
+    parts = domain.lower().split('.')
+    ignore = {'www', 'ac', 'za', 'edu', 'uk', 'us', 'com', 'org', 'net', 'depts', 'dept'}
+    domain_keywords = [p for p in parts if p not in ignore and len(p) > 2]
+
+    # Higher concurrency for faster processing (10 parallel enrichments)
+    semaphore = asyncio.Semaphore(10)
+
+    async def enrich_with_limit(faculty: dict[str, Any]) -> ProfessorProfile | None:
+        async with semaphore:
+            return await enrich_single_professor(faculty, university, domain, domain_keywords)
+
+    tasks = [enrich_with_limit(f) for f in faculty_data]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    professors = []
+    for result in results:
+        if isinstance(result, ProfessorProfile):
+            professors.append(result)
 
     return professors
 
@@ -419,10 +451,10 @@ Professors:
 Return JSON array (top 10 max) with:
 - professor_id: string
 - match_score: number (0-100)
-- alignment_reasons: string[] (2-3 specific reasons)
-- relevant_publication_titles: string[] (from their papers)
-- shared_keywords: string[]
-- recommendation_text: string (2-3 sentences)
+- alignment_reasons: string[] (2-3 specific reasons why this professor is a good match)
+- relevant_publication_titles: string[] (select publications that the student could cite or build upon for their research - papers most aligned with student's interests)
+- shared_keywords: string[] (research topics/keywords shared between student interests and professor's work)
+- recommendation_text: string (2-3 sentences explaining why this professor would be valuable for the student's research)
 
 Return ONLY valid JSON array, no other text."""
 

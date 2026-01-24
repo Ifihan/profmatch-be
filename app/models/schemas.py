@@ -31,6 +31,7 @@ class ProfessorProfile(BaseModel):
     university: str
     email: EmailStr | None = None
     scholar_id: str | None = None
+    google_scholar_url: str | None = None
     research_areas: list[str] = []
     publications: list[Publication] = []
     citation_metrics: CitationMetrics | None = None
