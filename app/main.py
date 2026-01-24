@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -8,25 +9,35 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from app.config import settings
 from app.routes import match, professor, session, upload
 from app.services.database import close_db, init_db
-from app.services.mcp_client import DocumentClient, ScholarClient, UniversityClient, server_manager
+from app.services.mcp_client import (
+    DocumentClient,
+    ScholarClient,
+    UniversityClient,
+    server_manager,
+)
 from app.services.redis import close_redis
 
 logging.basicConfig(level=logging.INFO)
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    
-    # Start persistent MCP servers
-    await server_manager.start_server(UniversityClient.SERVER_SCRIPT)
-    await server_manager.start_server(ScholarClient.SERVER_SCRIPT)
-    await server_manager.start_server(DocumentClient.SERVER_SCRIPT)
-    
+
+    for script in [
+        UniversityClient.SERVER_SCRIPT,
+        ScholarClient.SERVER_SCRIPT,
+        DocumentClient.SERVER_SCRIPT,
+    ]:
+        await server_manager.start_server(script)
+        logging.info(f"Started MCP server: {script}")
+
     yield
-    
+
     await server_manager.close_all()
     await close_redis()
     await close_db()
+
 
 app = FastAPI(
     title=settings.app_name,
