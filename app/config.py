@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     tavily_api_key: str = ""
 
+    # Google Cloud Storage settings
+    gcs_bucket_name: str = ""
+    gcs_project_id: str = ""
+
     class Config:
         env_file = ".env"
 
