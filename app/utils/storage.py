@@ -1,10 +1,33 @@
 import os
 import shutil
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from google.cloud import storage
+
+from app.config import settings
+
 UPLOAD_DIR = Path("uploads")
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
+
+# Initialize GCS client
+_gcs_client = None
+
+
+def get_gcs_client() -> storage.Client:
+    """Get or create GCS client."""
+    global _gcs_client
+    if _gcs_client is None:
+        _gcs_client = storage.Client(project=settings.gcs_project_id)
+    return _gcs_client
+
+
+def get_gcs_bucket() -> storage.Bucket:
+    """Get GCS bucket."""
+    client = get_gcs_client()
+    return client.bucket(settings.gcs_bucket_name)
 
 
 def ensure_upload_dir() -> None:
@@ -18,35 +41,75 @@ def validate_extension(filename: str) -> bool:
 
 
 async def save_file(session_id: str, filename: str, content: bytes) -> str:
-    """Save uploaded file and return file_id."""
-    ensure_upload_dir()
-    session_dir = UPLOAD_DIR / session_id
-    session_dir.mkdir(exist_ok=True)
-
+    """Save uploaded file to GCS and return file_id."""
     file_id = str(uuid4())
     ext = Path(filename).suffix.lower()
-    file_path = session_dir / f"{file_id}{ext}"
 
-    with open(file_path, "wb") as f:
-        f.write(content)
+    # Create blob path: session_id/file_id.ext
+    blob_name = f"{session_id}/{file_id}{ext}"
+
+    bucket = get_gcs_bucket()
+    blob = bucket.blob(blob_name)
+
+    # Add metadata for tracking
+    blob.metadata = {
+        "session_id": session_id,
+        "original_filename": filename,
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # Upload to GCS
+    blob.upload_from_string(content)
 
     return file_id
 
 
 def get_file_path(session_id: str, file_id: str) -> Path | None:
-    """Get path to uploaded file."""
-    session_dir = UPLOAD_DIR / session_id
-    if not session_dir.exists():
-        return None
+    """Download file from GCS to temporary location and return path."""
+    bucket = get_gcs_bucket()
 
-    for file in session_dir.iterdir():
-        if file.stem == file_id:
-            return file
+    for ext in ALLOWED_EXTENSIONS:
+        blob_name = f"{session_id}/{file_id}{ext}"
+        blob = bucket.blob(blob_name)
+        if blob.exists():
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+            blob.download_to_filename(temp_file.name)
+            return Path(temp_file.name)
+
     return None
 
 
 def delete_session_files(session_id: str) -> None:
-    """Delete all files for a session."""
-    session_dir = UPLOAD_DIR / session_id
-    if session_dir.exists():
-        shutil.rmtree(session_dir)
+    """Delete all files for a session from GCS using batch delete."""
+    bucket = get_gcs_bucket()
+
+    # Collect all blobs for the session
+    blobs = list(bucket.list_blobs(prefix=f"{session_id}/"))
+
+    if blobs:
+        bucket.delete_blobs(blobs)
+
+
+def cleanup_old_sessions(hours: int = 24) -> int:
+    """
+    Delete session folders older than specified hours.
+    Returns the number of sessions cleaned up.
+
+    Optimized to collect blobs for deletion in a single pass and batch delete.
+    """
+    bucket = get_gcs_bucket()
+    cutoff_time = datetime.now(timezone.utc).timestamp() - (hours * 3600)
+    sessions_to_delete: set[str] = set()
+    blobs_to_delete: list[storage.Blob] = []
+
+    for blob in bucket.list_blobs():
+        if blob.time_created.timestamp() < cutoff_time:
+            session_id = blob.name.split("/")[0]
+            sessions_to_delete.add(session_id)
+            blobs_to_delete.append(blob)
+
+    # Batch delete all old blobs at once
+    if blobs_to_delete:
+        bucket.delete_blobs(blobs_to_delete)
+
+    return len(sessions_to_delete)

@@ -1,38 +1,40 @@
 steps:
   # Build the container image
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/profmatchapi:$BUILD_ID', '.']
+  - name: "gcr.io/cloud-builders/docker"
+    args: ["build", "-t", "gcr.io/$PROJECT_ID/profmatchapi:$BUILD_ID", "."]
 
   # Push the container image to Container Registry
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/$PROJECT_ID/profmatchapi:$BUILD_ID']
+  - name: "gcr.io/cloud-builders/docker"
+    args: ["push", "gcr.io/$PROJECT_ID/profmatchapi:$BUILD_ID"]
 
   # Deploy container image to Cloud Run
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     entrypoint: gcloud
     args:
-      - 'run'
-      - 'deploy'
-      - 'profmatchapi'
-      - '--image'
-      - 'gcr.io/$PROJECT_ID/profmatchapi:$BUILD_ID'
-      - '--region'
-      - 'us-central1'
-      - '--platform'
-      - 'managed'
-      - '--memory'
-      - '1Gi'
-      - '--timeout'
-      - '600'
-      - '--allow-unauthenticated'
-      - '--set-env-vars'
-      - 'REDIS_URL=${_REDIS_URL},GEMINI_API_KEY=${_GEMINI_API_KEY},TAVILY_API_KEY=${_TAVILY_API_KEY},DATABASE_URL=${_DATABASE_URL},CORS_ORIGINS=["*"]'
+      - "run"
+      - "deploy"
+      - "profmatchapi"
+      - "--image"
+      - "gcr.io/$PROJECT_ID/profmatchapi:$BUILD_ID"
+      - "--region"
+      - "us-central1"
+      - "--platform"
+      - "managed"
+      - "--memory"
+      - "1Gi"
+      - "--timeout"
+      - "600"
+      - "--allow-unauthenticated"
+      - "--set-env-vars"
+      - 'REDIS_URL=${_REDIS_URL},GEMINI_API_KEY=${_GEMINI_API_KEY},TAVILY_API_KEY=${_TAVILY_API_KEY},DATABASE_URL=${_DATABASE_URL},GCS_BUCKET_NAME=${_GCS_BUCKET_NAME},GCS_PROJECT_ID=${_GCS_PROJECT_ID},CORS_ORIGINS=["*"]'
 
 images:
-  - 'gcr.io/$PROJECT_ID/profmatchapi:$BUILD_ID'
+  - "gcr.io/$PROJECT_ID/profmatchapi:$BUILD_ID"
 
 substitutions:
-  _REDIS_URL: ''
-  _GEMINI_API_KEY: ''
-  _TAVILY_API_KEY: ''
-  _DATABASE_URL: ''
+  _REDIS_URL: ""
+  _GEMINI_API_KEY: ""
+  _TAVILY_API_KEY: ""
+  _DATABASE_URL: ""
+  _GCS_BUCKET_NAME: ""
+  _GCS_PROJECT_ID: ""
