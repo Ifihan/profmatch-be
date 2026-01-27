@@ -1,12 +1,10 @@
-from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
-
-load_dotenv()
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
+    env: str = "development"
     app_name: str = "ProfMatch"
     debug: bool = False
 
@@ -29,7 +27,7 @@ class Settings(BaseSettings):
     gcs_project_id: str = ""
 
     class Config:
-        env_file = ".env"
+        env_file = (".env.production", ".env.development", ".env")
 
 
 settings = Settings()
