@@ -20,10 +20,12 @@ from app.services.mcp_client import (
 from app.services.redis import close_redis
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info(f"Starting ProfMatch in {settings.env} environment")
     await init_db()
 
     await asyncio.gather(
