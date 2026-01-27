@@ -262,7 +262,8 @@ async def fetch_faculty(
         for url in result:
             if url not in seen_urls:
                 seen_urls.add(url)
-                search_pairs.append((url, interest)
+                search_pairs.append((url, interest))
+
     async def search_one(url: str, interest: str) -> list[dict]:
         logger.info(f"Searching faculty for interest: {interest} at {url}")
         result = await university_client.search_faculty(url, interest)
