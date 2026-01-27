@@ -35,7 +35,7 @@ async def fetch_page(url: str) -> str:
         "Sec-Fetch-Site": "none",
         "Sec-Fetch-User": "?1",
     }
-    
+
     async with httpx.AsyncClient(follow_redirects=True) as client:
         resp = await client.get(url, timeout=30, headers=headers)
         resp.raise_for_status()
@@ -44,33 +44,41 @@ async def fetch_page(url: str) -> str:
 
 def extract_text_from_html(html: str, base_url: str = "") -> str:
     """extract text and links from HTML."""
-    text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
-    
+    text = re.sub(
+        r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE
+    )
+    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
+
     def replace_link(match):
         href = match.group(1)
         content = match.group(2)
         # Clean content
-        content = re.sub(r'<[^>]+>', '', content).strip()
-        
+        content = re.sub(r"<[^>]+>", "", content).strip()
+
         # Resolve relative URLs if base_url is provided
-        if base_url and not href.startswith(('http', 'https', 'mailto:', 'tel:')):
-            if href.startswith('/'):
+        if base_url and not href.startswith(("http", "https", "mailto:", "tel:")):
+            if href.startswith("/"):
                 # Handle root-relative
                 from urllib.parse import urlparse
+
                 parsed = urlparse(base_url)
                 href = f"{parsed.scheme}://{parsed.netloc}{href}"
             else:
                 # Handle relative
                 href = f"{base_url.rstrip('/')}/{href}"
-                
+
         return f" [{content}]({href}) "
 
-    text = re.sub(r'<a\s+[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>', replace_link, text, flags=re.DOTALL | re.IGNORECASE)
-    
+    text = re.sub(
+        r'<a\s+[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>',
+        replace_link,
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
     # Remove remaining tags
-    text = re.sub(r'<[^>]+>', ' ', text)
-    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
     return text[:25000]
 
 
@@ -78,7 +86,9 @@ async def llm_extract(prompt: str, content: str) -> str:
     """Use Gemini to extract structured data."""
     client = get_gemini()
     full_prompt = f"{prompt}\n\nContent:\n{content}"
-    response = client.models.generate_content(model="gemini-3-flash-preview", contents=full_prompt)
+    response = client.models.generate_content(
+        model="gemini-3-flash-preview", contents=full_prompt
+    )
     return response.text or ""
 
 
@@ -102,7 +112,7 @@ Return ONLY the full absolute URL, nothing else. If not found, return "NOT_FOUND
 
 async def extract_faculty_list(page_url: str) -> list[dict]:
     """Extract faculty members from a page."""
-    html = await fetch_page(page_url)    
+    html = await fetch_page(page_url)
     text = extract_text_from_html(html)
 
     prompt = """Extract all faculty/professor information from this page.
@@ -111,11 +121,11 @@ Return as JSON array with objects having keys: name, title, department, email, p
 Only include actual faculty members, not staff or students."""
 
     result = await llm_extract(prompt, f"Page URL: {page_url}\n\n{text}")
-        
+
     try:
-        result = result.replace('```json', '').replace('```', '').strip() 
-        start = result.find('[')
-        end = result.rfind(']') + 1
+        result = result.replace("```json", "").replace("```", "").strip()
+        start = result.find("[")
+        end = result.rfind("]") + 1
         if start != -1 and end != -1:
             json_str = result[start:end]
             return json.loads(json_str)
@@ -136,7 +146,7 @@ Use null for missing fields."""
     result = await llm_extract(prompt, text)
 
     try:
-        json_match = re.search(r'\{.*\}', result, re.DOTALL)
+        json_match = re.search(r"\{.*\}", result, re.DOTALL)
         if json_match:
             return json.loads(json_match.group())
     except json.JSONDecodeError:
@@ -154,7 +164,10 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "university_url": {"type": "string", "description": "University homepage URL"},
+                    "university_url": {
+                        "type": "string",
+                        "description": "University homepage URL",
+                    },
                 },
                 "required": ["university_url"],
             },
@@ -165,7 +178,10 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "department_url": {"type": "string", "description": "Department or faculty listing URL"},
+                    "department_url": {
+                        "type": "string",
+                        "description": "Department or faculty listing URL",
+                    },
                 },
                 "required": ["department_url"],
             },
@@ -176,7 +192,10 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "professor_url": {"type": "string", "description": "Professor profile page URL"},
+                    "professor_url": {
+                        "type": "string",
+                        "description": "Professor profile page URL",
+                    },
                 },
                 "required": ["professor_url"],
             },
@@ -187,8 +206,14 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "university_url": {"type": "string", "description": "University homepage URL"},
-                    "research_area": {"type": "string", "description": "Research area to search for"},
+                    "university_url": {
+                        "type": "string",
+                        "description": "University homepage URL",
+                    },
+                    "research_area": {
+                        "type": "string",
+                        "description": "Research area to search for",
+                    },
                 },
                 "required": ["university_url", "research_area"],
             },
@@ -207,10 +232,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 Return JSON array with objects having: name, url.
 Focus on academic/research departments like Computer Science, Engineering, etc."""
 
-        result = await llm_extract(prompt, f"Base URL: {arguments['university_url']}\n\n{text}")
+        result = await llm_extract(
+            prompt, f"Base URL: {arguments['university_url']}\n\n{text}"
+        )
 
         try:
-            json_match = re.search(r'\[.*\]', result, re.DOTALL)
+            json_match = re.search(r"\[.*\]", result, re.DOTALL)
             if json_match:
                 return [TextContent(type="text", text=json_match.group())]
         except:
@@ -226,9 +253,28 @@ Focus on academic/research departments like Computer Science, Engineering, etc."
         return [TextContent(type="text", text=json.dumps(details))]
 
     elif name == "search_faculty":
-        faculty_url = await find_faculty_directory(arguments["university_url"])
-        if not faculty_url:
-            return [TextContent(type="text", text=json.dumps({"error": "Could not find faculty directory"}))]
+        url = arguments["university_url"]
+        faculty_keywords = [
+            "faculty",
+            "staff",
+            "people",
+            "directory",
+            "team",
+            "professors",
+            "role",
+        ]
+        path = url.lower().split("?")[0]
+        if any(k in path for k in faculty_keywords):
+            faculty_url = url
+        else:
+            faculty_url = await find_faculty_directory(url)
+            if not faculty_url:
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps({"error": "Could not find faculty directory"}),
+                    )
+                ]
 
         faculty = await extract_faculty_list(faculty_url)
 
@@ -246,15 +292,17 @@ Focus on academic/research departments like Computer Science, Engineering, etc."
 
         return [TextContent(type="text", text=json.dumps(filtered))]
 
-    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
-
-    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+    return [
+        TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))
+    ]
 
 
 async def main():
     """Run the MCP server."""
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+        await server.run(
+            read_stream, write_stream, server.create_initialization_options()
+        )
 
 
 if __name__ == "__main__":

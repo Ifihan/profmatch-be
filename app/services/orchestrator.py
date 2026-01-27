@@ -5,15 +5,22 @@ from typing import Any
 from uuid import uuid4
 from urllib.parse import urlparse
 
-from app.models import CitationMetrics, Education, Experience, MatchResult, ProfessorProfile, Publication, StudentProfile
+from app.models import (
+    CitationMetrics,
+    Education,
+    Experience,
+    MatchResult,
+    ProfessorProfile,
+    Publication,
+    StudentProfile,
+)
 from app.services.cache import cache_professor, get_cached_professor
 from app.services.gemini import generate_text
 from app.services.mcp_client import (
-    server_manager, 
-    university_client, 
-    scholar_client, 
+    university_client,
+    scholar_client,
     document_client,
-    search_client
+    search_client,
 )
 from app.services.redis import get_session, set_session
 from app.utils.storage import get_file_path
@@ -35,16 +42,13 @@ async def run_matching(
     file_ids: list[str] | None = None,
 ) -> list[MatchResult]:
     """Run the full matching pipeline."""
-    # Ensure all MCP servers are started
-    await server_manager.start_server(university_client.SERVER_SCRIPT)
-    await server_manager.start_server(scholar_client.SERVER_SCRIPT)
-    await server_manager.start_server(search_client.SERVER_SCRIPT)
-
     await update_progress(session_id, 5, "Parsing uploaded documents")
 
     student_profile = None
     if file_ids:
-        student_profile = await parse_student_documents(session_id, file_ids, research_interests)
+        student_profile = await parse_student_documents(
+            session_id, file_ids, research_interests
+        )
 
     await update_progress(session_id, 15, "Fetching faculty directory")
 
@@ -115,43 +119,57 @@ async def parse_student_documents(
     skills = []
     extracted_keywords = list(research_interests)
 
-    for file_id in file_ids:
+    # Parse all documents in parallel
+    async def parse_single_file(file_id: str) -> dict | None:
         file_path = get_file_path(session_id, file_id)
         if not file_path:
-            continue
+            return None
+        return await document_client.parse_cv(str(file_path))
 
-        cv_data = await document_client.parse_cv(str(file_path))
+    tasks = [parse_single_file(fid) for fid in file_ids]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        cv_data = result
 
         for edu in cv_data.get("education", []) or []:
             if not isinstance(edu, dict):
                 continue
-            education.append(Education(
-                institution=to_str(edu.get("institution")) or "",
-                degree=to_str(edu.get("degree")) or "",
-                field=to_str(edu.get("field")),
-                year=to_int(edu.get("year")) or None,
-            ))
+            education.append(
+                Education(
+                    institution=to_str(edu.get("institution")) or "",
+                    degree=to_str(edu.get("degree")) or "",
+                    field=to_str(edu.get("field")),
+                    year=to_int(edu.get("year")) or None,
+                )
+            )
 
         for exp in cv_data.get("experience", []) or []:
             if not isinstance(exp, dict):
                 continue
-            experience.append(Experience(
-                organization=to_str(exp.get("organization")) or "",
-                role=to_str(exp.get("role")) or "",
-                description=to_str(exp.get("description")),
-                start_year=to_int(exp.get("start_year")) or None,
-                end_year=to_int(exp.get("end_year")) or None,
-            ))
+            experience.append(
+                Experience(
+                    organization=to_str(exp.get("organization")) or "",
+                    role=to_str(exp.get("role")) or "",
+                    description=to_str(exp.get("description")),
+                    start_year=to_int(exp.get("start_year")) or None,
+                    end_year=to_int(exp.get("end_year")) or None,
+                )
+            )
 
         for pub in cv_data.get("publications", []) or []:
             if not isinstance(pub, dict):
                 continue
-            publications.append(Publication(
-                title=to_str(pub.get("title")) or "",
-                authors=to_list(pub.get("authors")),
-                year=to_int(pub.get("year")),
-                venue=to_str(pub.get("venue")),
-            ))
+            publications.append(
+                Publication(
+                    title=to_str(pub.get("title")) or "",
+                    authors=to_list(pub.get("authors")),
+                    year=to_int(pub.get("year")),
+                    venue=to_str(pub.get("venue")),
+                )
+            )
 
         raw_skills = cv_data.get("skills", [])
         if isinstance(raw_skills, list):
@@ -179,63 +197,94 @@ async def parse_student_documents(
 def _extract_domain(url: str) -> str:
     """Extract domain from URL."""
     from urllib.parse import urlparse
+
     try:
         domain = urlparse(url).netloc
-        return domain.replace('www.', '').split('/')[0]
+        return domain.replace("www.", "").split("/")[0]
     except:
         return ""
 
 
 async def discover_faculty_url(university: str, interest: str) -> list[str]:
     """Discover specific faculty directory URL(s) via web search if generic."""
-    if not university.startswith(('http://', 'https://')):
-        university = 'https://' + university
+    if not university.startswith(("http://", "https://")):
+        university = "https://" + university
     parsed = urlparse(university)
 
     path = parsed.path.lower()
-    explicit_keywords = ['faculty', 'staff', 'people', 'directory', 'team', 'professors']
-    
+    explicit_keywords = [
+        "faculty",
+        "staff",
+        "people",
+        "directory",
+        "team",
+        "professors",
+    ]
+
     if any(k in path for k in explicit_keywords):
         return [university]
 
     # If it's a root domain OR a generic department page (e.g. /coe/), we Google.
     # Use the base domain (e.g. ttu.edu instead of www.ttu.edu) to catch subdomains (depts.ttu.edu)
-    domain = parsed.netloc.replace('www.', '')
+    domain = parsed.netloc.replace("www.", "")
     query = f"Computer Science faculty directory {domain}"
     if interest:
-         query = f"{interest} faculty directory {domain}"
-    
+        query = f"{interest} faculty directory {domain}"
+
     urls = await search_client.search_web(query)
     if urls:
-        return urls # Return ALL discovered URLs
-            
+        return urls  # Return ALL discovered URLs
+
     return [university]
 
 
-async def fetch_faculty(university: str, research_interests: list[str]) -> list[dict[str, Any]]:
+async def fetch_faculty(
+    university: str, research_interests: list[str]
+) -> list[dict[str, Any]]:
     """Fetch faculty from university directory via MCP."""
     import logging
+
     logger = logging.getLogger(__name__)
 
-    all_faculty = []
+    discovery_tasks = [
+        discover_faculty_url(university, interest)
+        for interest in research_interests[:3]
+    ]
+    discovery_results = await asyncio.gather(*discovery_tasks, return_exceptions=True)
 
-    for interest in research_interests[:3]:
-        target_urls = await discover_faculty_url(university, interest)
-        
-        for url in target_urls:
-            logger.info(f"Searching faculty for interest: {interest} at {url}")
-            
-            result = await university_client.search_faculty(url, interest)
-            if isinstance(result, dict):
-                logger.warning(f"Faculty search error at {url}: {result.get('error') or result.get('raw', 'Unknown error')}")
-                continue
-            if not isinstance(result, list):
-                logger.warning(f"Unexpected result type at {url}: {type(result)}")
-                continue
-            
-            faculty_dicts = [f for f in result if isinstance(f, dict) and f.get("name")]
-            logger.info(f"Found {len(faculty_dicts)} faculty members at {url}")
-            all_faculty.extend(faculty_dicts)
+    # Build (url, interest) pairs, deduplicating URLs
+    seen_urls: set[str] = set()
+    search_pairs: list[tuple[str, str]] = []
+    for interest, result in zip(research_interests[:3], discovery_results):
+        if isinstance(result, Exception):
+            logger.warning(f"Faculty URL discovery failed for '{interest}': {result}")
+            continue
+        for url in result:
+            if url not in seen_urls:
+                seen_urls.add(url)
+                search_pairs.append((url, interest)
+    async def search_one(url: str, interest: str) -> list[dict]:
+        logger.info(f"Searching faculty for interest: {interest} at {url}")
+        result = await university_client.search_faculty(url, interest)
+        if isinstance(result, dict):
+            logger.warning(
+                f"Faculty search error at {url}: {result.get('error') or result.get('raw', 'Unknown error')}"
+            )
+            return []
+        if not isinstance(result, list):
+            logger.warning(f"Unexpected result type at {url}: {type(result)}")
+            return []
+        faculty_dicts = [f for f in result if isinstance(f, dict) and f.get("name")]
+        logger.info(f"Found {len(faculty_dicts)} faculty members at {url}")
+        return faculty_dicts
+
+    fetch_tasks = [search_one(url, interest) for url, interest in search_pairs]
+    fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+
+    all_faculty = []
+    for result in fetch_results:
+        if isinstance(result, list):
+            all_faculty.extend(result)
 
     seen_names = set()
     unique_faculty = []
@@ -267,13 +316,15 @@ async def enrich_single_professor(
     scholar_task = scholar_client.search_scholar(name)
     google_scholar_task = search_client.find_google_scholar_url(name, domain)
 
-    candidates, google_scholar_url = await asyncio.gather(scholar_task, google_scholar_task)
+    candidates, google_scholar_url = await asyncio.gather(
+        scholar_task, google_scholar_task
+    )
 
     # Filter by Domain
     scholar = None
     if candidates:
         for cand in candidates:
-            affiliations = cand.get('affiliations', [])
+            affiliations = cand.get("affiliations", [])
             if not affiliations:
                 continue
             for aff in affiliations:
@@ -368,19 +419,35 @@ async def enrich_single_professor(
     return prof
 
 
-async def enrich_professors(faculty_data: list[dict[str, Any]], university: str) -> list[ProfessorProfile]:
+async def enrich_professors(
+    faculty_data: list[dict[str, Any]], university: str
+) -> list[ProfessorProfile]:
     """Enrich professor profiles with publication data via MCP (concurrent)."""
     domain = _extract_domain(university)
-    parts = domain.lower().split('.')
-    ignore = {'www', 'ac', 'za', 'edu', 'uk', 'us', 'com', 'org', 'net', 'depts', 'dept'}
+    parts = domain.lower().split(".")
+    ignore = {
+        "www",
+        "ac",
+        "za",
+        "edu",
+        "uk",
+        "us",
+        "com",
+        "org",
+        "net",
+        "depts",
+        "dept",
+    }
     domain_keywords = [p for p in parts if p not in ignore and len(p) > 2]
 
-    # Higher concurrency for faster processing (10 parallel enrichments)
+    # Higher concurrency for faster processing
     semaphore = asyncio.Semaphore(10)
 
     async def enrich_with_limit(faculty: dict[str, Any]) -> ProfessorProfile | None:
         async with semaphore:
-            return await enrich_single_professor(faculty, university, domain, domain_keywords)
+            return await enrich_single_professor(
+                faculty, university, domain, domain_keywords
+            )
 
     tasks = [enrich_with_limit(f) for f in faculty_data]
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -396,7 +463,21 @@ async def enrich_professors(faculty_data: list[dict[str, Any]], university: str)
 def extract_research_areas(publications: list[Publication]) -> list[str]:
     """Extract research areas from publication titles."""
     words: dict[str, int] = {}
-    stopwords = {"the", "a", "an", "of", "in", "for", "and", "to", "on", "with", "using", "based", "via"}
+    stopwords = {
+        "the",
+        "a",
+        "an",
+        "of",
+        "in",
+        "for",
+        "and",
+        "to",
+        "on",
+        "with",
+        "using",
+        "based",
+        "via",
+    }
 
     for pub in publications:
         for word in pub.title.lower().split():
@@ -430,15 +511,17 @@ Student Background:
 
     prof_summaries = []
     for p in professors:
-        prof_summaries.append({
-            "id": str(p.id),
-            "name": p.name,
-            "title": p.title,
-            "department": p.department,
-            "research_areas": p.research_areas[:5],
-            "recent_papers": [pub.title for pub in p.publications[:5]],
-            "h_index": p.citation_metrics.h_index if p.citation_metrics else 0,
-        })
+        prof_summaries.append(
+            {
+                "id": str(p.id),
+                "name": p.name,
+                "title": p.title,
+                "department": p.department,
+                "research_areas": p.research_areas[:5],
+                "recent_papers": [pub.title for pub in p.publications[:5]],
+                "h_index": p.citation_metrics.h_index if p.citation_metrics else 0,
+            }
+        )
 
     prompt = f"""Analyze professors and rank by research alignment with student interests.
 
@@ -461,7 +544,9 @@ Return ONLY valid JSON array, no other text."""
     response = await generate_text(prompt)
 
     try:
-        json_match = __import__("re").search(r'\[.*\]', response, __import__("re").DOTALL)
+        json_match = __import__("re").search(
+            r"\[.*\]", response, __import__("re").DOTALL
+        )
         if not json_match:
             return []
 
@@ -475,18 +560,21 @@ Return ONLY valid JSON array, no other text."""
                 continue
 
             relevant_pubs = [
-                p for p in prof.publications
+                p
+                for p in prof.publications
                 if p.title in m.get("relevant_publication_titles", [])
             ]
 
-            matches.append(MatchResult(
-                professor=prof,
-                match_score=float(m.get("match_score", 0)),
-                alignment_reasons=m.get("alignment_reasons", []),
-                relevant_publications=relevant_pubs,
-                shared_keywords=m.get("shared_keywords", []),
-                recommendation_text=m.get("recommendation_text", ""),
-            ))
+            matches.append(
+                MatchResult(
+                    professor=prof,
+                    match_score=float(m.get("match_score", 0)),
+                    alignment_reasons=m.get("alignment_reasons", []),
+                    relevant_publications=relevant_pubs,
+                    shared_keywords=m.get("shared_keywords", []),
+                    recommendation_text=m.get("recommendation_text", ""),
+                )
+            )
 
         return sorted(matches, key=lambda x: x.match_score, reverse=True)
     except (json.JSONDecodeError, KeyError, TypeError):
