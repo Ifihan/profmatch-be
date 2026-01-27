@@ -15,7 +15,7 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = [
         "http://localhost:3000",
-        "https://profmatch-912048666815.us-central1.run.app/",
+        "https://profmatch-912048666815.us-central1.run.app",
     ]
 
     max_upload_size_mb: int = 10
