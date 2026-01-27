@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.config import settings
+from app.middleware import TimingMiddleware
 from app.routes import match, professor, session, upload
 from app.services.cleanup import start_cleanup_task, stop_cleanup_task
 from app.services.database import close_db, init_db
@@ -67,6 +68,9 @@ app.include_router(session.router)
 app.include_router(upload.router)
 app.include_router(match.router)
 app.include_router(professor.router)
+
+# Add timing middleware first (executes last due to middleware stack)
+app.add_middleware(TimingMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
