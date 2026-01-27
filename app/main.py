@@ -13,6 +13,7 @@ from app.services.database import close_db, init_db
 from app.services.mcp_client import (
     DocumentClient,
     ScholarClient,
+    SearchClient,
     UniversityClient,
     server_manager,
 )
@@ -25,13 +26,13 @@ logging.basicConfig(level=logging.INFO)
 async def lifespan(app: FastAPI):
     await init_db()
 
-    for script in [
-        UniversityClient.SERVER_SCRIPT,
-        ScholarClient.SERVER_SCRIPT,
-        DocumentClient.SERVER_SCRIPT,
-    ]:
-        await server_manager.start_server(script)
-        logging.info(f"Started MCP server: {script}")
+    await asyncio.gather(
+        server_manager.start_server(UniversityClient.SERVER_SCRIPT),
+        server_manager.start_server(ScholarClient.SERVER_SCRIPT),
+        server_manager.start_server(DocumentClient.SERVER_SCRIPT),
+        server_manager.start_server(SearchClient.SERVER_SCRIPT),
+    )
+    logging.info("All MCP servers started in parallel")
 
     # Start background cleanup task
     await start_cleanup_task()

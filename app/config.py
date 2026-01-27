@@ -13,7 +13,10 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379"
     database_url: str = "postgresql+asyncpg://localhost:5432/profmatch"
 
-    cors_origins: list[str] = ["http://localhost:3000"]
+    cors_origins: list[str] = [
+        "http://localhost:3000",
+        "https://profmatch-912048666815.us-central1.run.app/",
+    ]
 
     max_upload_size_mb: int = 10
     session_ttl_hours: int = 24
