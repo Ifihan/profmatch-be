@@ -121,7 +121,7 @@ async def parse_student_documents(
 
     # Parse all documents in parallel
     async def parse_single_file(file_id: str) -> dict | None:
-        file_path = get_file_path(session_id, file_id)
+        file_path = await get_file_path(session_id, file_id)
         if not file_path:
             return None
         return await document_client.parse_cv(str(file_path))

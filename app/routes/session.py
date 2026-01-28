@@ -48,7 +48,7 @@ async def delete_session_data(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     # Delete files from GCS
-    delete_session_files(session_id)
+    await delete_session_files(session_id)
 
     return {"message": "Session deleted"}
 
@@ -58,7 +58,7 @@ async def trigger_cleanup():
     """Manually trigger cleanup of old sessions (admin endpoint)."""
     from app.config import settings
 
-    cleaned_count = cleanup_old_sessions(hours=settings.session_ttl_hours)
+    cleaned_count = await cleanup_old_sessions(hours=settings.session_ttl_hours)
     return {
         "message": "Cleanup completed",
         "sessions_cleaned": cleaned_count,
