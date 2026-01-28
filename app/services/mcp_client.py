@@ -121,6 +121,14 @@ class ScholarClient:
         result = await server_manager.call_tool(self.SERVER_SCRIPT, "get_coauthors", {"scholar_id": scholar_id})
         return result if isinstance(result, list) else []
 
+    async def scrape_google_scholar_metrics(self, google_scholar_url: str) -> dict:
+        """Scrape accurate citation metrics from Google Scholar profile page."""
+        return await server_manager.call_tool(
+            self.SERVER_SCRIPT,
+            "scrape_google_scholar_metrics",
+            {"google_scholar_url": google_scholar_url}
+        )
+
 
 class UniversityClient:
     """Client for University MCP server."""

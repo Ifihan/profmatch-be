@@ -66,6 +66,13 @@ async def run_matching(
 
     session = await get_session(session_id)
     if session:
+        # Calculate total matching time
+        import time
+        start_time = session.get("match_start_time")
+        if start_time:
+            total_time = time.time() - start_time
+            session["total_match_time"] = total_time
+
         session["match_status"] = "completed"
         session["match_progress"] = 100
         session["current_step"] = "Complete"
@@ -370,16 +377,10 @@ async def enrich_single_professor(
 
     scholar_id = scholar.get("author_id")
 
-    # Fetch publications and metrics concurrently
-    tasks_to_run = []
+    # Fetch only publications (skip metrics - we'll scrape from Google Scholar later)
+    pubs_data = []
     if scholar_id:
-        tasks_to_run.append(scholar_client.get_publications(scholar_id))
-        tasks_to_run.append(scholar_client.get_citation_metrics(scholar_id))
-
-    if tasks_to_run:
-        pubs_data, metrics_data = await asyncio.gather(*tasks_to_run)
-    else:
-        pubs_data, metrics_data = [], {}
+        pubs_data = await scholar_client.get_publications(scholar_id)
 
     publications = [
         Publication(
@@ -394,9 +395,10 @@ async def enrich_single_professor(
         for p in pubs_data
     ]
 
+    # Placeholder metrics - will be scraped from Google Scholar for final matches
     citation_metrics = CitationMetrics(
-        h_index=metrics_data.get("h_index", 0),
-        total_citations=metrics_data.get("total_citations", 0),
+        h_index=0,
+        total_citations=0,
     )
 
     research_areas = extract_research_areas(publications)
@@ -441,8 +443,8 @@ async def enrich_professors(
     }
     domain_keywords = [p for p in parts if p not in ignore and len(p) > 2]
 
-    # Higher concurrency for faster processing
-    semaphore = asyncio.Semaphore(10)
+    # Higher concurrency for faster processing (increased since we skip metrics call)
+    semaphore = asyncio.Semaphore(20)
 
     async def enrich_with_limit(faculty: dict[str, Any]) -> ProfessorProfile | None:
         async with semaphore:
@@ -488,6 +490,32 @@ def extract_research_areas(publications: list[Publication]) -> list[str]:
 
     sorted_words = sorted(words.items(), key=lambda x: x[1], reverse=True)
     return [w for w, _ in sorted_words[:10]]
+
+
+async def enrich_matches_with_google_scholar_metrics(matches: list[MatchResult]) -> None:
+    """Scrape accurate Google Scholar metrics for matched professors."""
+    async def scrape_one_match(match: MatchResult):
+        """Scrape metrics for a single match."""
+        if not match.professor.google_scholar_url:
+            return
+
+        try:
+            metrics = await scholar_client.scrape_google_scholar_metrics(
+                match.professor.google_scholar_url
+            )
+
+            if metrics and not metrics.get("error"):
+                # Update the professor's citation metrics
+                match.professor.citation_metrics = CitationMetrics(
+                    h_index=metrics.get("h_index", 0),
+                    total_citations=metrics.get("total_citations", 0),
+                )
+        except Exception:
+            # Silently fail - keep existing metrics from Semantic Scholar
+            pass
+
+    # Scrape metrics for all matches in parallel
+    await asyncio.gather(*[scrape_one_match(m) for m in matches], return_exceptions=True)
 
 
 async def generate_matches(
@@ -577,6 +605,11 @@ Return ONLY valid JSON array, no other text."""
                 )
             )
 
-        return sorted(matches, key=lambda x: x.match_score, reverse=True)
+        sorted_matches = sorted(matches, key=lambda x: x.match_score, reverse=True)
+
+        # Scrape accurate Google Scholar metrics for final matches only
+        await enrich_matches_with_google_scholar_metrics(sorted_matches)
+
+        return sorted_matches
     except (json.JSONDecodeError, KeyError, TypeError):
         return []
