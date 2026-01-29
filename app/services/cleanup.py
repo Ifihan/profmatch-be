@@ -19,7 +19,7 @@ async def cleanup_loop():
             await asyncio.sleep(3600)
 
             logger.info("Running session cleanup task")
-            cleaned_count = cleanup_old_sessions(hours=settings.session_ttl_hours)
+            cleaned_count = await cleanup_old_sessions(hours=settings.session_ttl_hours)
             logger.info(f"Cleaned up {cleaned_count} old sessions from GCS")
 
         except Exception as e:

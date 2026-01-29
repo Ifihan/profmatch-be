@@ -1,4 +1,5 @@
 import logging
+import time
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
@@ -26,6 +27,7 @@ class MatchStatusResponse(BaseModel):
     status: str
     progress: int
     current_step: str | None = None
+    elapsed_time: float | None = None  # Time in seconds
 
 
 class MatchResultsResponse(BaseModel):
@@ -33,6 +35,7 @@ class MatchResultsResponse(BaseModel):
     match_id: str
     status: str
     results: list[MatchResult] = []
+    total_time: float | None = None  # Total matching time in seconds
 
 
 async def run_matching_task(
@@ -48,8 +51,11 @@ async def run_matching_task(
         logger.exception(f"Matching failed: {e}")
         session = await get_session(session_id)
         if session:
+            # Calculate total time on failure
+            total_time = time.time() - session.get("match_start_time", time.time())
             session["match_status"] = "failed"
             session["current_step"] = f"Error: {str(e)[:100]}"
+            session["total_match_time"] = total_time
             await set_session(session_id, session)
 
 
@@ -68,6 +74,7 @@ async def start_match(request: MatchRequest, background_tasks: BackgroundTasks):
     session["match_status"] = "processing"
     session["match_progress"] = 0
     session["current_step"] = "Initializing"
+    session["match_start_time"] = time.time()
     await set_session(request.session_id, session)
 
     background_tasks.add_task(
@@ -93,11 +100,22 @@ async def get_match_status(match_id: str, session_id: str):
     if not session or session.get("match_id") != match_id:
         raise HTTPException(status_code=404, detail="Match not found")
 
+    # Calculate elapsed time
+    elapsed_time = None
+    if session.get("match_start_time"):
+        if session.get("total_match_time"):
+            # Completed - use final time
+            elapsed_time = session["total_match_time"]
+        else:
+            # Still running - calculate current elapsed time
+            elapsed_time = time.time() - session["match_start_time"]
+
     return MatchStatusResponse(
         match_id=match_id,
         status=session.get("match_status", "unknown"),
         progress=session.get("match_progress", 0),
         current_step=session.get("current_step"),
+        elapsed_time=elapsed_time,
     )
 
 
@@ -112,8 +130,11 @@ async def get_match_results(match_id: str, session_id: str):
         raise HTTPException(status_code=400, detail="Matching not yet completed")
 
     results = session.get("match_results", [])
+    total_time = session.get("total_match_time")
+
     return MatchResultsResponse(
         match_id=match_id,
         status="completed",
         results=[MatchResult(**r) for r in results],
+        total_time=total_time,
     )

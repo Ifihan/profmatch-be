@@ -278,19 +278,29 @@ Focus on academic/research departments like Computer Science, Engineering, etc."
 
         faculty = await extract_faculty_list(faculty_url)
 
-        research_area = arguments["research_area"].lower()
-        filtered = []
+        # Keyword-based filtering: split research area into individual keywords
+        stopwords = {"in", "the", "of", "and", "for", "a", "an", "to", "on", "with", "field", "area", "using", "based"}
+        keywords = [
+            w.lower().strip(".,;:()")
+            for w in arguments["research_area"].split()
+            if w.lower().strip(".,;:()") not in stopwords and len(w.strip(".,;:()")) > 2
+        ]
+
+        scored = []
         for f in faculty:
-            name = (f.get("name") or "").lower()
-            title = (f.get("title") or "").lower()
-            dept = (f.get("department") or "").lower()
-            if research_area in name or research_area in title or research_area in dept:
-                filtered.append(f)
+            text = " ".join([
+                (f.get("name") or ""),
+                (f.get("title") or ""),
+                (f.get("department") or ""),
+            ]).lower()
+            score = sum(1 for kw in keywords if kw in text)
+            scored.append((f, score))
 
-        if not filtered:
-            filtered = faculty[:20]
+        # Sort by keyword match count (descending), then append unmatched
+        scored.sort(key=lambda x: x[1], reverse=True)
+        sorted_faculty = [f for f, _ in scored]
 
-        return [TextContent(type="text", text=json.dumps(filtered))]
+        return [TextContent(type="text", text=json.dumps(sorted_faculty))]
 
     return [
         TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))

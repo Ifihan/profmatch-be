@@ -1,4 +1,5 @@
 import httpx
+from bs4 import BeautifulSoup
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
@@ -80,6 +81,59 @@ async def get_author_papers(author_id: str, limit: int = 20, years: int = 5) -> 
         return papers
 
 
+async def scrape_google_scholar_metrics(google_scholar_url: str) -> dict:
+    """Scrape citation metrics directly from Google Scholar profile page."""
+    if not google_scholar_url:
+        return {"error": "No Google Scholar URL provided"}
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            resp = await client.get(
+                google_scholar_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Find the metrics table
+            metrics = {}
+            rows = soup.select("table#gsc_rsb_st tr")
+
+            for row in rows:
+                cells = row.find_all("td", class_="gsc_rsb_std")
+                if not cells:
+                    continue
+
+                # Get the label
+                label_elem = row.find("a", class_="gsc_rsb_f")
+                if not label_elem:
+                    continue
+
+                label = label_elem.get_text(strip=True).lower()
+
+                # Get the "All" column value (first td)
+                if len(cells) >= 1:
+                    value = cells[0].get_text(strip=True)
+                    try:
+                        value = int(value)
+                    except ValueError:
+                        value = 0
+
+                    if "citation" in label:
+                        metrics["total_citations"] = value
+                    elif "h-index" in label:
+                        metrics["h_index"] = value
+
+            return metrics
+
+    except Exception as e:
+        return {"error": f"Failed to scrape Google Scholar: {str(e)}"}
+
+
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     """List available tools."""
@@ -129,6 +183,17 @@ async def list_tools() -> list[Tool]:
                     "scholar_id": {"type": "string", "description": "Semantic Scholar author ID"},
                 },
                 "required": ["scholar_id"],
+            },
+        ),
+        Tool(
+            name="scrape_google_scholar_metrics",
+            description="Scrape accurate citation metrics from Google Scholar profile page",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "google_scholar_url": {"type": "string", "description": "Google Scholar profile URL"},
+                },
+                "required": ["google_scholar_url"],
             },
         ),
     ]
@@ -193,6 +258,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         sorted_coauthors = sorted(coauthor_counts.items(), key=lambda x: x[1], reverse=True)
         top_coauthors = [name for name, _ in sorted_coauthors[1:11]]  # Skip self, get top 10
         return [TextContent(type="text", text=json.dumps(top_coauthors))]
+
+    elif name == "scrape_google_scholar_metrics":
+        metrics = await scrape_google_scholar_metrics(arguments["google_scholar_url"])
+        return [TextContent(type="text", text=json.dumps(metrics))]
 
     return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
 

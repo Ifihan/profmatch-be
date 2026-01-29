@@ -1,3 +1,4 @@
+import asyncio
 import os
 import shutil
 import tempfile
@@ -48,68 +49,84 @@ async def save_file(session_id: str, filename: str, content: bytes) -> str:
     # Create blob path: session_id/file_id.ext
     blob_name = f"{session_id}/{file_id}{ext}"
 
-    bucket = get_gcs_bucket()
-    blob = bucket.blob(blob_name)
+    def _upload():
+        bucket = get_gcs_bucket()
+        blob = bucket.blob(blob_name)
 
-    # Add metadata for tracking
-    blob.metadata = {
-        "session_id": session_id,
-        "original_filename": filename,
-        "uploaded_at": datetime.now(timezone.utc).isoformat(),
-    }
+        # Add metadata for tracking
+        blob.metadata = {
+            "session_id": session_id,
+            "original_filename": filename,
+            "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        }
 
-    # Upload to GCS
-    blob.upload_from_string(content)
+        # Upload to GCS
+        blob.upload_from_string(content)
+
+    # Run blocking I/O in thread pool to avoid blocking event loop
+    await asyncio.to_thread(_upload)
 
     return file_id
 
 
-def get_file_path(session_id: str, file_id: str) -> Path | None:
+async def get_file_path(session_id: str, file_id: str) -> Path | None:
     """Download file from GCS to temporary location and return path."""
-    bucket = get_gcs_bucket()
+    def _download():
+        bucket = get_gcs_bucket()
 
-    for ext in ALLOWED_EXTENSIONS:
-        blob_name = f"{session_id}/{file_id}{ext}"
-        blob = bucket.blob(blob_name)
-        if blob.exists():
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
-            blob.download_to_filename(temp_file.name)
-            return Path(temp_file.name)
+        for ext in ALLOWED_EXTENSIONS:
+            blob_name = f"{session_id}/{file_id}{ext}"
+            blob = bucket.blob(blob_name)
+            if blob.exists():
+                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+                blob.download_to_filename(temp_file.name)
+                return Path(temp_file.name)
 
-    return None
+        return None
+
+    # Run blocking I/O in thread pool to avoid blocking event loop
+    return await asyncio.to_thread(_download)
 
 
-def delete_session_files(session_id: str) -> None:
+async def delete_session_files(session_id: str) -> None:
     """Delete all files for a session from GCS using batch delete."""
-    bucket = get_gcs_bucket()
+    def _delete():
+        bucket = get_gcs_bucket()
 
-    # Collect all blobs for the session
-    blobs = list(bucket.list_blobs(prefix=f"{session_id}/"))
+        # Collect all blobs for the session
+        blobs = list(bucket.list_blobs(prefix=f"{session_id}/"))
 
-    if blobs:
-        bucket.delete_blobs(blobs)
+        if blobs:
+            bucket.delete_blobs(blobs)
+
+    # Run blocking I/O in thread pool to avoid blocking event loop
+    await asyncio.to_thread(_delete)
 
 
-def cleanup_old_sessions(hours: int = 24) -> int:
+async def cleanup_old_sessions(hours: int = 24) -> int:
     """
     Delete session folders older than specified hours.
     Returns the number of sessions cleaned up.
 
     Optimized to collect blobs for deletion in a single pass and batch delete.
     """
-    bucket = get_gcs_bucket()
-    cutoff_time = datetime.now(timezone.utc).timestamp() - (hours * 3600)
-    sessions_to_delete: set[str] = set()
-    blobs_to_delete: list[storage.Blob] = []
+    def _cleanup():
+        bucket = get_gcs_bucket()
+        cutoff_time = datetime.now(timezone.utc).timestamp() - (hours * 3600)
+        sessions_to_delete: set[str] = set()
+        blobs_to_delete: list[storage.Blob] = []
 
-    for blob in bucket.list_blobs():
-        if blob.time_created.timestamp() < cutoff_time:
-            session_id = blob.name.split("/")[0]
-            sessions_to_delete.add(session_id)
-            blobs_to_delete.append(blob)
+        for blob in bucket.list_blobs():
+            if blob.time_created.timestamp() < cutoff_time:
+                session_id = blob.name.split("/")[0]
+                sessions_to_delete.add(session_id)
+                blobs_to_delete.append(blob)
 
-    # Batch delete all old blobs at once
-    if blobs_to_delete:
-        bucket.delete_blobs(blobs_to_delete)
+        # Batch delete all old blobs at once
+        if blobs_to_delete:
+            bucket.delete_blobs(blobs_to_delete)
 
-    return len(sessions_to_delete)
+        return len(sessions_to_delete)
+
+    # Run blocking I/O in thread pool to avoid blocking event loop
+    return await asyncio.to_thread(_cleanup)
