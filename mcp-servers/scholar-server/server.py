@@ -127,8 +127,6 @@ async def scrape_google_scholar_metrics(google_scholar_url: str) -> dict:
                         metrics["total_citations"] = value
                     elif "h-index" in label:
                         metrics["h_index"] = value
-                    elif "i10-index" in label:
-                        metrics["i10_index"] = value
 
             return metrics
 

@@ -54,13 +54,21 @@ async def run_matching(
 
     faculty_data = await fetch_faculty(university, research_interests)
 
-    await update_progress(session_id, 35, "Retrieving publication data")
+    await update_progress(session_id, 25, "Filtering candidates")
+
+    faculty_data = await filter_faculty_by_relevance(faculty_data, research_interests)
+
+    await update_progress(session_id, 30, "Retrieving publication data")
 
     professors = await enrich_professors(faculty_data, university)
 
-    await update_progress(session_id, 65, "Analyzing research alignment")
+    await update_progress(session_id, 70, "Analyzing research alignment")
 
     matches = await generate_matches(professors, research_interests, student_profile)
+
+    await update_progress(session_id, 90, "Fetching citation metrics")
+
+    await enrich_matches_with_google_scholar(matches, university)
 
     await update_progress(session_id, 95, "Finalizing recommendations")
 
@@ -302,13 +310,64 @@ async def fetch_faculty(
             seen_names.add(name)
             unique_faculty.append(f)
 
-    return unique_faculty[:30]
+    logger.info(f"Total unique faculty found: {len(unique_faculty)}")
+    return unique_faculty
+
+
+async def filter_faculty_by_relevance(
+    faculty_data: list[dict[str, Any]],
+    research_interests: list[str],
+) -> list[dict[str, Any]]:
+    """Use LLM to filter faculty list to the most relevant candidates."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    if len(faculty_data) <= 30:
+        return faculty_data
+
+    interests_str = ", ".join(research_interests)
+
+    # Build lightweight summaries (name + title + department only)
+    summaries = []
+    for i, f in enumerate(faculty_data):
+        parts = [f"[{i}] {f.get('name', 'Unknown')}"]
+        if f.get("title"):
+            parts.append(f"- {f['title']}")
+        if f.get("department"):
+            parts.append(f"({f['department']})")
+        summaries.append(" ".join(parts))
+
+    faculty_list = "\n".join(summaries)
+
+    prompt = f"""From this faculty list, select the 30 professors most likely to research: {interests_str}
+
+Faculty:
+{faculty_list}
+
+Return ONLY a JSON array of the index numbers (e.g. [0, 3, 7, ...]). No other text."""
+
+    response = await generate_text(prompt)
+
+    try:
+        json_match = __import__("re").search(r"\[.*\]", response, __import__("re").DOTALL)
+        if json_match:
+            indices = json.loads(json_match.group())
+            selected = [faculty_data[i] for i in indices if isinstance(i, int) and 0 <= i < len(faculty_data)]
+            if selected:
+                logger.info(f"LLM filtered {len(faculty_data)} faculty down to {len(selected)}")
+                return selected
+    except (json.JSONDecodeError, IndexError, TypeError):
+        pass
+
+    # Fallback: return first 30
+    logger.warning("LLM filtering failed, falling back to first 30")
+    return faculty_data[:30]
 
 
 async def enrich_single_professor(
     faculty: dict[str, Any],
     university: str,
-    domain: str,
     domain_keywords: list[str],
 ) -> ProfessorProfile | None:
     """Enrich a single professor profile with publication data."""
@@ -320,13 +379,8 @@ async def enrich_single_professor(
     if cached:
         return cached
 
-    # Run Semantic Scholar search and Google Scholar URL search concurrently
-    scholar_task = scholar_client.search_scholar(name)
-    google_scholar_task = search_client.find_google_scholar_url(name, domain)
-
-    candidates, google_scholar_url = await asyncio.gather(
-        scholar_task, google_scholar_task
-    )
+    # Search Semantic Scholar only (Google Scholar URL search deferred to final matches)
+    candidates = await scholar_client.search_scholar(name)
 
     # Filter by Domain
     scholar = None
@@ -367,7 +421,6 @@ async def enrich_single_professor(
             department=faculty.get("department") or extra_data.get("department"),
             university=university,
             email=faculty.get("email") or extra_data.get("email"),
-            google_scholar_url=google_scholar_url,
             research_areas=research_areas,
             publications=[],
             last_updated=datetime.utcnow(),
@@ -401,7 +454,7 @@ async def enrich_single_professor(
         total_citations=0,
     )
 
-    research_areas = extract_research_areas(publications)
+    research_areas = await extract_research_areas(publications)
 
     prof = ProfessorProfile(
         id=uuid4(),
@@ -411,7 +464,6 @@ async def enrich_single_professor(
         university=university,
         email=faculty.get("email"),
         scholar_id=scholar_id,
-        google_scholar_url=google_scholar_url,
         research_areas=research_areas,
         publications=publications,
         citation_metrics=citation_metrics,
@@ -449,7 +501,7 @@ async def enrich_professors(
     async def enrich_with_limit(faculty: dict[str, Any]) -> ProfessorProfile | None:
         async with semaphore:
             return await enrich_single_professor(
-                faculty, university, domain, domain_keywords
+                faculty, university, domain_keywords
             )
 
     tasks = [enrich_with_limit(f) for f in faculty_data]
@@ -463,59 +515,65 @@ async def enrich_professors(
     return professors
 
 
-def extract_research_areas(publications: list[Publication]) -> list[str]:
-    """Extract research areas from publication titles."""
-    words: dict[str, int] = {}
-    stopwords = {
-        "the",
-        "a",
-        "an",
-        "of",
-        "in",
-        "for",
-        "and",
-        "to",
-        "on",
-        "with",
-        "using",
-        "based",
-        "via",
-    }
+async def extract_research_areas(publications: list[Publication]) -> list[str]:
+    """Extract research areas from publication titles using LLM."""
+    if not publications:
+        return []
 
-    for pub in publications:
-        for word in pub.title.lower().split():
-            word = word.strip(".,;:()[]")
-            if len(word) > 3 and word not in stopwords:
-                words[word] = words.get(word, 0) + 1
+    titles = [p.title for p in publications[:15]]
+    titles_str = "\n".join(f"- {t}" for t in titles)
 
-    sorted_words = sorted(words.items(), key=lambda x: x[1], reverse=True)
-    return [w for w, _ in sorted_words[:10]]
+    prompt = f"""From these publication titles, extract 3-7 research areas/topics.
+Return short, specific phrases (e.g. "computer vision", "natural language processing", "reinforcement learning").
+
+Publications:
+{titles_str}
+
+Return ONLY a JSON array of strings. No other text."""
+
+    response = await generate_text(prompt)
+
+    try:
+        json_match = __import__("re").search(r"\[.*\]", response, __import__("re").DOTALL)
+        if json_match:
+            areas = json.loads(json_match.group())
+            if areas and isinstance(areas, list):
+                return [str(a) for a in areas[:7]]
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    return []
 
 
-async def enrich_matches_with_google_scholar_metrics(matches: list[MatchResult]) -> None:
-    """Scrape accurate Google Scholar metrics for matched professors."""
-    async def scrape_one_match(match: MatchResult):
-        """Scrape metrics for a single match."""
-        if not match.professor.google_scholar_url:
-            return
+async def enrich_matches_with_google_scholar(matches: list[MatchResult], university: str) -> None:
+    """Find Google Scholar URLs and scrape metrics for final matched professors."""
+    domain = _extract_domain(university)
 
+    async def enrich_one_match(match: MatchResult):
+        """Find Google Scholar URL and scrape metrics for a single match."""
         try:
-            metrics = await scholar_client.scrape_google_scholar_metrics(
-                match.professor.google_scholar_url
-            )
-
-            if metrics and not metrics.get("error"):
-                # Update the professor's citation metrics
-                match.professor.citation_metrics = CitationMetrics(
-                    h_index=metrics.get("h_index", 0),
-                    total_citations=metrics.get("total_citations", 0),
+            # Find Google Scholar URL if not already set
+            if not match.professor.google_scholar_url:
+                url = await search_client.find_google_scholar_url(
+                    match.professor.name, domain
                 )
+                if url:
+                    match.professor.google_scholar_url = url
+
+            # Scrape metrics if we have a URL
+            if match.professor.google_scholar_url:
+                metrics = await scholar_client.scrape_google_scholar_metrics(
+                    match.professor.google_scholar_url
+                )
+                if metrics and not metrics.get("error"):
+                    match.professor.citation_metrics = CitationMetrics(
+                        h_index=metrics.get("h_index", 0),
+                        total_citations=metrics.get("total_citations", 0),
+                    )
         except Exception:
-            # Silently fail - keep existing metrics from Semantic Scholar
             pass
 
-    # Scrape metrics for all matches in parallel
-    await asyncio.gather(*[scrape_one_match(m) for m in matches], return_exceptions=True)
+    await asyncio.gather(*[enrich_one_match(m) for m in matches], return_exceptions=True)
 
 
 async def generate_matches(
@@ -606,9 +664,6 @@ Return ONLY valid JSON array, no other text."""
             )
 
         sorted_matches = sorted(matches, key=lambda x: x.match_score, reverse=True)
-
-        # Scrape accurate Google Scholar metrics for final matches only
-        await enrich_matches_with_google_scholar_metrics(sorted_matches)
 
         return sorted_matches
     except (json.JSONDecodeError, KeyError, TypeError):
