@@ -25,3 +25,18 @@ dependencies = [
     "tavily-python>=0.7.19",
     "uvicorn>=0.40.0",
 ]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "httpx>=0.28.1",
+    "pytest-mock>=3.14.0",
+    "fakeredis>=2.26.0",
+    "aiosqlite>=0.20.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["tests*", "uploads*"]

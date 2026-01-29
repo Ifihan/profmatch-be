@@ -92,6 +92,28 @@ profmatch/
 └── pyproject.toml
 ```
 
+## Testing
+
+```bash
+# Install test dependencies
+uv sync --extra test
+
+# Run all tests
+uv run pytest
+
+# Run with coverage report
+uv run pytest --cov=app --cov-report=term-missing
+
+# Run only unit tests
+uv run pytest tests/unit/
+
+# Run only integration tests
+uv run pytest tests/integration/
+
+# Run specific test file
+uv run pytest tests/unit/test_redis.py -v
+```
+
 ## Environment Variables
 
 | Variable | Description | Default |
