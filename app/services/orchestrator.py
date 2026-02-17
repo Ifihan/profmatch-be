@@ -1,5 +1,7 @@
 import asyncio
 import json
+import logging
+import time
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -15,15 +17,12 @@ from app.models import (
     StudentProfile,
 )
 from app.services.cache import cache_professor, get_cached_professor
-from app.services.gemini import generate_text
-from app.services.mcp_client import (
-    university_client,
-    scholar_client,
-    document_client,
-    search_client,
-)
+from app.services import gemini, tools
+from app.services.api_cache import get_cached, set_cached
 from app.services.redis import get_session, set_session
 from app.utils.storage import get_file_path
+
+logger = logging.getLogger(__name__)
 
 
 async def update_progress(session_id: str, progress: int, step: str) -> None:
@@ -42,52 +41,86 @@ async def run_matching(
     file_ids: list[str] | None = None,
 ) -> list[MatchResult]:
     """Run the full matching pipeline."""
-    await update_progress(session_id, 5, "Parsing uploaded documents")
+    # Wide event: one structured log per matching request
+    wide_event: dict[str, Any] = {
+        "event": "matching_pipeline",
+        "session_id": session_id,
+        "university": university,
+        "research_interests": research_interests,
+        "file_count": len(file_ids) if file_ids else 0,
+        "start_time": time.time(),
+    }
 
-    student_profile = None
-    if file_ids:
-        student_profile = await parse_student_documents(
-            session_id, file_ids, research_interests
+    try:
+        await update_progress(session_id, 5, "Parsing uploaded documents")
+
+        student_profile = None
+        if file_ids:
+            student_profile = await parse_student_documents(
+                session_id, file_ids, research_interests
+            )
+            wide_event["student_profile_parsed"] = True
+
+        await update_progress(session_id, 15, "Fetching faculty directory")
+
+        faculty_data = await fetch_faculty(university, research_interests)
+        wide_event["faculty_found"] = len(faculty_data)
+
+        await update_progress(session_id, 25, "Filtering candidates")
+
+        faculty_data = await filter_faculty_by_relevance(
+            faculty_data, research_interests
         )
+        wide_event["faculty_filtered"] = len(faculty_data)
 
-    await update_progress(session_id, 15, "Fetching faculty directory")
+        await update_progress(session_id, 30, "Retrieving publication data")
 
-    faculty_data = await fetch_faculty(university, research_interests)
+        professors = await enrich_professors(faculty_data, university)
+        wide_event["professors_enriched"] = len(professors)
 
-    await update_progress(session_id, 25, "Filtering candidates")
+        await update_progress(session_id, 70, "Analyzing research alignment")
 
-    faculty_data = await filter_faculty_by_relevance(faculty_data, research_interests)
+        matches = await generate_matches(
+            professors, research_interests, student_profile
+        )
+        wide_event["matches_generated"] = len(matches)
 
-    await update_progress(session_id, 30, "Retrieving publication data")
+        await update_progress(session_id, 90, "Fetching citation metrics")
 
-    professors = await enrich_professors(faculty_data, university)
+        await enrich_matches_with_google_scholar(matches, university)
 
-    await update_progress(session_id, 70, "Analyzing research alignment")
+        await update_progress(session_id, 95, "Finalizing recommendations")
 
-    matches = await generate_matches(professors, research_interests, student_profile)
+        session = await get_session(session_id)
+        if session:
+            start_time = session.get("match_start_time")
+            if start_time:
+                total_time = time.time() - start_time
+                session["total_match_time"] = total_time
+                wide_event["total_time_seconds"] = total_time
 
-    await update_progress(session_id, 90, "Fetching citation metrics")
+            session["match_status"] = "completed"
+            session["match_progress"] = 100
+            session["current_step"] = "Complete"
+            session["match_results"] = [
+                m.model_dump(mode="json") for m in matches
+            ]
+            await set_session(session_id, session)
 
-    await enrich_matches_with_google_scholar(matches, university)
+        wide_event["outcome"] = "success"
+        wide_event["status_code"] = 200
+        return matches
 
-    await update_progress(session_id, 95, "Finalizing recommendations")
+    except Exception as e:
+        wide_event["outcome"] = "error"
+        wide_event["error"] = {"message": str(e), "type": type(e).__name__}
+        raise
 
-    session = await get_session(session_id)
-    if session:
-        # Calculate total matching time
-        import time
-        start_time = session.get("match_start_time")
-        if start_time:
-            total_time = time.time() - start_time
-            session["total_match_time"] = total_time
-
-        session["match_status"] = "completed"
-        session["match_progress"] = 100
-        session["current_step"] = "Complete"
-        session["match_results"] = [m.model_dump(mode="json") for m in matches]
-        await set_session(session_id, session)
-
-    return matches
+    finally:
+        wide_event["duration_ms"] = int(
+            (time.time() - wide_event["start_time"]) * 1000
+        )
+        logger.info(json.dumps(wide_event, default=str))
 
 
 def to_str(val) -> str | None:
@@ -134,12 +167,15 @@ async def parse_student_documents(
     skills = []
     extracted_keywords = list(research_interests)
 
-    # Parse all documents in parallel
     async def parse_single_file(file_id: str) -> dict | None:
         file_path = await get_file_path(session_id, file_id)
         if not file_path:
             return None
-        return await document_client.parse_cv(str(file_path))
+        # Step 1: Extract raw text (no LLM)
+        text = tools.extract_text_from_file(str(file_path))
+        # Step 2: Use Gemini structured output to parse CV
+        parsed = await gemini.parse_cv(text)
+        return parsed.model_dump()
 
     tasks = [parse_single_file(fid) for fid in file_ids]
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -211,12 +247,10 @@ async def parse_student_documents(
 
 def _extract_domain(url: str) -> str:
     """Extract domain from URL."""
-    from urllib.parse import urlparse
-
     try:
         domain = urlparse(url).netloc
         return domain.replace("www.", "").split("/")[0]
-    except:
+    except Exception:
         return ""
 
 
@@ -239,16 +273,20 @@ async def discover_faculty_url(university: str, interest: str) -> list[str]:
     if any(k in path for k in explicit_keywords):
         return [university]
 
-    # If it's a root domain OR a generic department page (e.g. /coe/), we Google.
-    # Use the base domain (e.g. ttu.edu instead of www.ttu.edu) to catch subdomains (depts.ttu.edu)
     domain = parsed.netloc.replace("www.", "")
     query = f"Computer Science faculty directory {domain}"
     if interest:
         query = f"{interest} faculty directory {domain}"
 
-    urls = await search_client.search_web(query)
+    # Check cache first
+    cached = await get_cached("search", query)
+    if cached and isinstance(cached, list):
+        return cached
+
+    urls = await tools.search_web(query)
     if urls:
-        return urls  # Return ALL discovered URLs
+        await set_cached("search", query, data=urls, ttl_days=7)
+        return urls
 
     return [university]
 
@@ -256,23 +294,23 @@ async def discover_faculty_url(university: str, interest: str) -> list[str]:
 async def fetch_faculty(
     university: str, research_interests: list[str]
 ) -> list[dict[str, Any]]:
-    """Fetch faculty from university directory via MCP."""
-    import logging
-
-    logger = logging.getLogger(__name__)
-
+    """Fetch faculty from university directory."""
     discovery_tasks = [
         discover_faculty_url(university, interest)
         for interest in research_interests[:3]
     ]
-    discovery_results = await asyncio.gather(*discovery_tasks, return_exceptions=True)
+    discovery_results = await asyncio.gather(
+        *discovery_tasks, return_exceptions=True
+    )
 
     # Build (url, interest) pairs, deduplicating URLs
     seen_urls: set[str] = set()
     search_pairs: list[tuple[str, str]] = []
     for interest, result in zip(research_interests[:3], discovery_results):
         if isinstance(result, Exception):
-            logger.warning(f"Faculty URL discovery failed for '{interest}': {result}")
+            logger.warning(
+                f"Faculty URL discovery failed for '{interest}': {result}"
+            )
             continue
         for url in result:
             if url not in seen_urls:
@@ -281,18 +319,100 @@ async def fetch_faculty(
 
     async def search_one(url: str, interest: str) -> list[dict]:
         logger.info(f"Searching faculty for interest: {interest} at {url}")
-        result = await university_client.search_faculty(url, interest)
-        if isinstance(result, dict):
-            logger.warning(
-                f"Faculty search error at {url}: {result.get('error') or result.get('raw', 'Unknown error')}"
-            )
-            return []
-        if not isinstance(result, list):
-            logger.warning(f"Unexpected result type at {url}: {type(result)}")
-            return []
-        faculty_dicts = [f for f in result if isinstance(f, dict) and f.get("name")]
-        logger.info(f"Found {len(faculty_dicts)} faculty members at {url}")
-        return faculty_dicts
+
+        # Check cache for this faculty page
+        cached = await get_cached("faculty_page", url)
+        if cached and isinstance(cached, list):
+            logger.info(f"Cache hit for faculty page: {url}")
+            faculty_dicts = cached
+        else:
+            # Determine if URL is already a faculty directory
+            faculty_keywords = [
+                "faculty",
+                "staff",
+                "people",
+                "directory",
+                "team",
+                "professors",
+            ]
+            path_lower = url.lower().split("?")[0]
+            faculty_url = url
+
+            if not any(k in path_lower for k in faculty_keywords):
+                # Need to discover the faculty directory first
+                try:
+                    page_content = await tools.fetch_page_content(url)
+                    found_url = await gemini.find_faculty_directory_url(
+                        page_content, url
+                    )
+                    if found_url:
+                        faculty_url = found_url
+                    else:
+                        logger.warning(
+                            f"Could not find faculty directory at {url}"
+                        )
+                        return []
+                except Exception as e:
+                    logger.warning(f"Faculty directory discovery failed: {e}")
+                    return []
+
+            # Fetch and parse the faculty page
+            try:
+                page_content = await tools.fetch_page_content(faculty_url)
+                members = await gemini.extract_faculty(
+                    page_content, faculty_url
+                )
+                faculty_dicts = [m.model_dump() for m in members]
+                # Cache the parsed faculty list
+                await set_cached(
+                    "faculty_page", url, data=faculty_dicts, ttl_days=7
+                )
+            except Exception as e:
+                logger.warning(f"Faculty extraction failed at {url}: {e}")
+                return []
+
+        # Keyword-based pre-filtering (same scoring as university-server)
+        stopwords = {
+            "in",
+            "the",
+            "of",
+            "and",
+            "for",
+            "a",
+            "an",
+            "to",
+            "on",
+            "with",
+            "field",
+            "area",
+            "using",
+            "based",
+        }
+        keywords = [
+            w.lower().strip(".,;:()")
+            for w in interest.split()
+            if w.lower().strip(".,;:()") not in stopwords
+            and len(w.strip(".,;:()")) > 2
+        ]
+
+        scored = []
+        for f in faculty_dicts:
+            text = " ".join(
+                [
+                    (f.get("name") or ""),
+                    (f.get("title") or ""),
+                    (f.get("department") or ""),
+                ]
+            ).lower()
+            score = sum(1 for kw in keywords if kw in text)
+            scored.append((f, score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        sorted_faculty = [f for f, _ in scored]
+
+        valid = [f for f in sorted_faculty if isinstance(f, dict) and f.get("name")]
+        logger.info(f"Found {len(valid)} faculty members at {url}")
+        return valid
 
     fetch_tasks = [search_one(url, interest) for url, interest in search_pairs]
     fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
@@ -302,7 +422,7 @@ async def fetch_faculty(
         if isinstance(result, list):
             all_faculty.extend(result)
 
-    seen_names = set()
+    seen_names: set[str] = set()
     unique_faculty = []
     for f in all_faculty:
         name = f.get("name", "")
@@ -319,16 +439,11 @@ async def filter_faculty_by_relevance(
     research_interests: list[str],
 ) -> list[dict[str, Any]]:
     """Use LLM to filter faculty list to the most relevant candidates."""
-    import logging
-
-    logger = logging.getLogger(__name__)
-
     if len(faculty_data) <= 30:
         return faculty_data
 
     interests_str = ", ".join(research_interests)
 
-    # Build lightweight summaries (name + title + department only)
     summaries = []
     for i, f in enumerate(faculty_data):
         parts = [f"[{i}] {f.get('name', 'Unknown')}"]
@@ -340,27 +455,22 @@ async def filter_faculty_by_relevance(
 
     faculty_list = "\n".join(summaries)
 
-    prompt = f"""From this faculty list, select the 30 professors most likely to research: {interests_str}
-
-Faculty:
-{faculty_list}
-
-Return ONLY a JSON array of the index numbers (e.g. [0, 3, 7, ...]). No other text."""
-
-    response = await generate_text(prompt)
-
     try:
-        json_match = __import__("re").search(r"\[.*\]", response, __import__("re").DOTALL)
-        if json_match:
-            indices = json.loads(json_match.group())
-            selected = [faculty_data[i] for i in indices if isinstance(i, int) and 0 <= i < len(faculty_data)]
-            if selected:
-                logger.info(f"LLM filtered {len(faculty_data)} faculty down to {len(selected)}")
-                return selected
-    except (json.JSONDecodeError, IndexError, TypeError):
+        result = await gemini.filter_faculty(faculty_list, interests_str)
+        indices = result.selected_indices
+        selected = [
+            faculty_data[i]
+            for i in indices
+            if isinstance(i, int) and 0 <= i < len(faculty_data)
+        ]
+        if selected:
+            logger.info(
+                f"LLM filtered {len(faculty_data)} faculty down to {len(selected)}"
+            )
+            return selected
+    except Exception:
         pass
 
-    # Fallback: return first 30
     logger.warning("LLM filtering failed, falling back to first 30")
     return faculty_data[:30]
 
@@ -379,10 +489,18 @@ async def enrich_single_professor(
     if cached:
         return cached
 
-    # Search Semantic Scholar only (Google Scholar URL search deferred to final matches)
-    candidates = await scholar_client.search_scholar(name)
+    # Check API cache for scholar search
+    cached_scholars = await get_cached("scholar_search", name)
+    if cached_scholars and isinstance(cached_scholars, list):
+        candidates = cached_scholars
+    else:
+        candidates = await tools.search_scholar(name)
+        if candidates:
+            await set_cached(
+                "scholar_search", name, data=candidates, ttl_days=30
+            )
 
-    # Filter by Domain
+    # Filter by domain
     scholar = None
     if candidates:
         for cand in candidates:
@@ -403,16 +521,20 @@ async def enrich_single_professor(
     # If no scholar found, try to enrich from profile page
     if not scholar:
         profile_url = faculty.get("profile_url")
-        extra_data = {}
+        extra_data: dict = {}
         if profile_url:
             try:
-                extra_data = await university_client.get_professor_page(profile_url)
+                page_content = await tools.fetch_page_content(profile_url)
+                details = await gemini.extract_professor_details(page_content)
+                extra_data = details.model_dump()
             except Exception:
                 pass
 
         research_areas = extra_data.get("research_areas") or []
         if isinstance(research_areas, str):
-            research_areas = [r.strip() for r in research_areas.split(",") if r.strip()]
+            research_areas = [
+                r.strip() for r in research_areas.split(",") if r.strip()
+            ]
 
         prof = ProfessorProfile(
             id=uuid4(),
@@ -430,10 +552,9 @@ async def enrich_single_professor(
 
     scholar_id = scholar.get("author_id")
 
-    # Fetch only publications (skip metrics - we'll scrape from Google Scholar later)
     pubs_data = []
     if scholar_id:
-        pubs_data = await scholar_client.get_publications(scholar_id)
+        pubs_data = await tools.get_publications(scholar_id)
 
     publications = [
         Publication(
@@ -448,13 +569,12 @@ async def enrich_single_professor(
         for p in pubs_data
     ]
 
-    # Placeholder metrics - will be scraped from Google Scholar for final matches
     citation_metrics = CitationMetrics(
         h_index=0,
         total_citations=0,
     )
 
-    research_areas = await extract_research_areas(publications)
+    research_areas = await _extract_research_areas(publications)
 
     prof = ProfessorProfile(
         id=uuid4(),
@@ -477,7 +597,7 @@ async def enrich_single_professor(
 async def enrich_professors(
     faculty_data: list[dict[str, Any]], university: str
 ) -> list[ProfessorProfile]:
-    """Enrich professor profiles with publication data via MCP (concurrent)."""
+    """Enrich professor profiles with publication data (concurrent)."""
     domain = _extract_domain(university)
     parts = domain.lower().split(".")
     ignore = {
@@ -495,10 +615,11 @@ async def enrich_professors(
     }
     domain_keywords = [p for p in parts if p not in ignore and len(p) > 2]
 
-    # Higher concurrency for faster processing (increased since we skip metrics call)
     semaphore = asyncio.Semaphore(20)
 
-    async def enrich_with_limit(faculty: dict[str, Any]) -> ProfessorProfile | None:
+    async def enrich_with_limit(
+        faculty: dict[str, Any],
+    ) -> ProfessorProfile | None:
         async with semaphore:
             return await enrich_single_professor(
                 faculty, university, domain_keywords
@@ -515,7 +636,9 @@ async def enrich_professors(
     return professors
 
 
-async def extract_research_areas(publications: list[Publication]) -> list[str]:
+async def _extract_research_areas(
+    publications: list[Publication],
+) -> list[str]:
     """Extract research areas from publication titles using LLM."""
     if not publications:
         return []
@@ -523,48 +646,61 @@ async def extract_research_areas(publications: list[Publication]) -> list[str]:
     titles = [p.title for p in publications[:15]]
     titles_str = "\n".join(f"- {t}" for t in titles)
 
-    prompt = f"""From these publication titles, extract 3-7 research areas/topics.
-Return short, specific phrases (e.g. "computer vision", "natural language processing", "reinforcement learning").
-
-Publications:
-{titles_str}
-
-Return ONLY a JSON array of strings. No other text."""
-
-    response = await generate_text(prompt)
-
     try:
-        json_match = __import__("re").search(r"\[.*\]", response, __import__("re").DOTALL)
-        if json_match:
-            areas = json.loads(json_match.group())
-            if areas and isinstance(areas, list):
-                return [str(a) for a in areas[:7]]
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    return []
+        result = await gemini.extract_research_areas(titles_str)
+        return result.areas[:7]
+    except Exception:
+        return []
 
 
-async def enrich_matches_with_google_scholar(matches: list[MatchResult], university: str) -> None:
+async def enrich_matches_with_google_scholar(
+    matches: list[MatchResult], university: str
+) -> None:
     """Find Google Scholar URLs and scrape metrics for final matched professors."""
     domain = _extract_domain(university)
 
     async def enrich_one_match(match: MatchResult):
-        """Find Google Scholar URL and scrape metrics for a single match."""
         try:
-            # Find Google Scholar URL if not already set
             if not match.professor.google_scholar_url:
-                url = await search_client.find_google_scholar_url(
-                    match.professor.name, domain
+                # Check cache for Google Scholar URL
+                cached_url = await get_cached(
+                    "gs_url", match.professor.name, domain
                 )
+                if cached_url and isinstance(cached_url, dict):
+                    url = cached_url.get("url")
+                else:
+                    url = await tools.find_google_scholar_url(
+                        match.professor.name, domain
+                    )
+                    await set_cached(
+                        "gs_url",
+                        match.professor.name,
+                        domain,
+                        data={"url": url},
+                        ttl_days=30,
+                    )
                 if url:
                     match.professor.google_scholar_url = url
 
-            # Scrape metrics if we have a URL
             if match.professor.google_scholar_url:
-                metrics = await scholar_client.scrape_google_scholar_metrics(
-                    match.professor.google_scholar_url
+                # Check cache for metrics
+                cached_metrics = await get_cached(
+                    "gs_metrics", match.professor.google_scholar_url
                 )
+                if cached_metrics and isinstance(cached_metrics, dict) and not cached_metrics.get("error"):
+                    metrics = cached_metrics
+                else:
+                    metrics = await tools.scrape_google_scholar_metrics(
+                        match.professor.google_scholar_url
+                    )
+                    if metrics and not metrics.get("error"):
+                        await set_cached(
+                            "gs_metrics",
+                            match.professor.google_scholar_url,
+                            data=metrics,
+                            ttl_days=7,
+                        )
+
                 if metrics and not metrics.get("error"):
                     match.professor.citation_metrics = CitationMetrics(
                         h_index=metrics.get("h_index", 0),
@@ -573,7 +709,9 @@ async def enrich_matches_with_google_scholar(matches: list[MatchResult], univers
         except Exception:
             pass
 
-    await asyncio.gather(*[enrich_one_match(m) for m in matches], return_exceptions=True)
+    await asyncio.gather(
+        *[enrich_one_match(m) for m in matches], return_exceptions=True
+    )
 
 
 async def generate_matches(
@@ -588,13 +726,13 @@ async def generate_matches(
     interests_str = ", ".join(research_interests)
     student_context = ""
     if student_profile:
-        student_context = f"""
-Student Background:
-- Education: {json.dumps([e.model_dump() for e in student_profile.education], default=str)}
-- Skills: {", ".join(student_profile.skills)}
-- Publications: {len(student_profile.publications)} papers
-- Keywords: {", ".join(student_profile.extracted_keywords[:10])}
-"""
+        student_context = (
+            "\nStudent Background:\n"
+            f"- Education: {json.dumps([e.model_dump() for e in student_profile.education], default=str)}\n"
+            f"- Skills: {', '.join(student_profile.skills)}\n"
+            f"- Publications: {len(student_profile.publications)} papers\n"
+            f"- Keywords: {', '.join(student_profile.extracted_keywords[:10])}"
+        )
 
     prof_summaries = []
     for p in professors:
@@ -606,65 +744,44 @@ Student Background:
                 "department": p.department,
                 "research_areas": p.research_areas[:5],
                 "recent_papers": [pub.title for pub in p.publications[:5]],
-                "h_index": p.citation_metrics.h_index if p.citation_metrics else 0,
+                "h_index": p.citation_metrics.h_index
+                if p.citation_metrics
+                else 0,
             }
         )
 
-    prompt = f"""Analyze professors and rank by research alignment with student interests.
-
-Student Research Interests: {interests_str}
-{student_context}
-
-Professors:
-{json.dumps(prof_summaries, indent=2)}
-
-Return JSON array (top 10 max) with:
-- professor_id: string
-- match_score: number (0-100)
-- alignment_reasons: string[] (2-3 specific reasons why this professor is a good match)
-- relevant_publication_titles: string[] (select publications that the student could cite or build upon for their research - papers most aligned with student's interests)
-- shared_keywords: string[] (research topics/keywords shared between student interests and professor's work)
-- recommendation_text: string (2-3 sentences explaining why this professor would be valuable for the student's research)
-
-Return ONLY valid JSON array, no other text."""
-
-    response = await generate_text(prompt)
+    professors_json = json.dumps(prof_summaries, indent=2)
 
     try:
-        json_match = __import__("re").search(
-            r"\[.*\]", response, __import__("re").DOTALL
+        result = await gemini.generate_match_rankings(
+            professors_json, interests_str, student_context
         )
-        if not json_match:
-            return []
 
-        matches_data = json.loads(json_match.group())
         matches = []
         prof_map = {str(p.id): p for p in professors}
 
-        for m in matches_data[:10]:
-            prof = prof_map.get(m.get("professor_id"))
+        for m in result.matches[:10]:
+            prof = prof_map.get(m.professor_id)
             if not prof:
                 continue
 
             relevant_pubs = [
                 p
                 for p in prof.publications
-                if p.title in m.get("relevant_publication_titles", [])
+                if p.title in m.relevant_publication_titles
             ]
 
             matches.append(
                 MatchResult(
                     professor=prof,
-                    match_score=float(m.get("match_score", 0)),
-                    alignment_reasons=m.get("alignment_reasons", []),
+                    match_score=m.match_score,
+                    alignment_reasons=m.alignment_reasons,
                     relevant_publications=relevant_pubs,
-                    shared_keywords=m.get("shared_keywords", []),
-                    recommendation_text=m.get("recommendation_text", ""),
+                    shared_keywords=m.shared_keywords,
+                    recommendation_text=m.recommendation_text,
                 )
             )
 
-        sorted_matches = sorted(matches, key=lambda x: x.match_score, reverse=True)
-
-        return sorted_matches
-    except (json.JSONDecodeError, KeyError, TypeError):
+        return sorted(matches, key=lambda x: x.match_score, reverse=True)
+    except Exception:
         return []

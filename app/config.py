@@ -20,7 +20,8 @@ class Settings(BaseSettings):
     session_ttl_hours: int = 24
 
     gemini_api_key: str = ""
-    tavily_api_key: str = ""
+    serper_api_key: str = ""
+    jina_api_key: str = ""
 
     # Google Cloud Storage settings
     gcs_bucket_name: str = ""

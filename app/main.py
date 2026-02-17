@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -11,13 +10,6 @@ from app.middleware import TimingMiddleware
 from app.routes import match, professor, session, upload
 from app.services.cleanup import start_cleanup_task, stop_cleanup_task
 from app.services.database import close_db, init_db
-from app.services.mcp_client import (
-    DocumentClient,
-    ScholarClient,
-    SearchClient,
-    UniversityClient,
-    server_manager,
-)
 from app.services.redis import close_redis
 
 logging.basicConfig(level=logging.INFO)
@@ -28,31 +20,11 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info(f"Starting ProfMatch in {settings.env} environment")
     await init_db()
-
-    await asyncio.gather(
-        server_manager.start_server(UniversityClient.SERVER_SCRIPT),
-        server_manager.start_server(ScholarClient.SERVER_SCRIPT),
-        server_manager.start_server(DocumentClient.SERVER_SCRIPT),
-        server_manager.start_server(SearchClient.SERVER_SCRIPT),
-    )
-    logging.info("All MCP servers started in parallel")
-
-    # Start background cleanup task
     await start_cleanup_task()
 
     yield
 
-    # Stop cleanup task
     await stop_cleanup_task()
-
-    # Close MCP servers (suppress shutdown errors)
-    try:
-        await server_manager.close_all()
-    except Exception:
-        # Suppress MCP shutdown errors - known issue with stdio clients
-        # Servers are properly terminated via process cleanup
-        pass
-
     await close_redis()
     await close_db()
 

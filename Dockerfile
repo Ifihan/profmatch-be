@@ -9,7 +9,6 @@ COPY pyproject.toml uv.lock* ./
 RUN uv sync --frozen --no-dev
 
 COPY app/ ./app/
-COPY mcp-servers/ ./mcp-servers/
 
 EXPOSE 8080
 
