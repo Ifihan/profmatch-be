@@ -10,7 +10,6 @@ from app.middleware import TimingMiddleware
 from app.routes import match, professor, session, upload
 from app.services.cleanup import start_cleanup_task, stop_cleanup_task
 from app.services.database import close_db, init_db
-from app.services.redis import close_redis
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,7 +24,6 @@ async def lifespan(app: FastAPI):
     yield
 
     await stop_cleanup_task()
-    await close_redis()
     await close_db()
 
 

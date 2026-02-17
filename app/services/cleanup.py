@@ -1,9 +1,10 @@
-"""Background cleanup service for removing old session files from GCS."""
+"""Background cleanup service for removing old session files from GCS and expired DB sessions."""
 
 import asyncio
 import logging
 
 from app.config import settings
+from app.services.session_store import delete_expired_sessions
 from app.utils.storage import cleanup_old_sessions
 
 logger = logging.getLogger(__name__)
@@ -18,9 +19,12 @@ async def cleanup_loop():
             # Wait 1 hour between cleanup runs
             await asyncio.sleep(3600)
 
-            logger.info("Running session cleanup task")
+            logger.info("Running cleanup task")
             cleaned_count = await cleanup_old_sessions(hours=settings.session_ttl_hours)
             logger.info(f"Cleaned up {cleaned_count} old sessions from GCS")
+
+            expired_count = await delete_expired_sessions()
+            logger.info(f"Cleaned up {expired_count} expired sessions from DB")
 
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")

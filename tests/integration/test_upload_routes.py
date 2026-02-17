@@ -2,21 +2,31 @@
 
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
-from io import BytesIO
 
-from app.services import redis as redis_module
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.models.database import Base
+
+# In-memory SQLite for integration tests
+_test_engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+_test_session_maker = async_sessionmaker(_test_engine, class_=AsyncSession, expire_on_commit=False)
 
 
 @pytest.fixture(autouse=True)
-def reset_redis_state():
-    """Reset redis module state before each test."""
-    redis_module.redis_client = None
-    redis_module.use_memory_store = True
-    redis_module.memory_store.clear()
+async def setup_db():
+    """Create tables before each test, drop after."""
+    async with _test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
     yield
-    redis_module.redis_client = None
-    redis_module.use_memory_store = False
-    redis_module.memory_store.clear()
+    async with _test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+
+
+@pytest.fixture(autouse=True)
+def patch_session_store():
+    """Redirect session_store to use the in-memory DB."""
+    with patch("app.services.session_store.async_session", _test_session_maker):
+        yield
 
 
 @pytest.fixture

@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncGenerator, Generator
 from datetime import datetime
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -134,32 +134,6 @@ def sample_cv_data() -> dict[str, Any]:
 
 
 @pytest.fixture
-def mock_redis():
-    """Mock Redis client for testing."""
-    storage = {}
-
-    async def mock_get(key):
-        return storage.get(key)
-
-    async def mock_setex(key, ttl, value):
-        storage[key] = value
-
-    async def mock_delete(key):
-        if key in storage:
-            del storage[key]
-            return 1
-        return 0
-
-    client = AsyncMock()
-    client.get = mock_get
-    client.setex = mock_setex
-    client.delete = mock_delete
-    client.ping = AsyncMock()
-
-    return client, storage
-
-
-@pytest.fixture
 def mock_gcs_bucket():
     """Mock GCS bucket for testing."""
     blobs = {}
@@ -205,7 +179,6 @@ async def test_app() -> AsyncGenerator[AsyncClient, None]:
     """Create test client for FastAPI app."""
     # Import here to avoid loading app before mocks are in place
     with patch.dict("os.environ", {
-        "REDIS_URL": "redis://localhost:6379",
         "DATABASE_URL": "sqlite+aiosqlite:///:memory:",
         "GEMINI_API_KEY": "test-key",
         "SERPER_API_KEY": "test-serper-key",

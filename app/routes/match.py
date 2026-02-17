@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from app.models import MatchResult
 from app.services.orchestrator import run_matching
-from app.services.redis import get_session, set_session
+from app.services.session_store import get_session, set_session
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/match", tags=["match"])
@@ -46,23 +46,27 @@ async def run_matching_task(
 ) -> None:
     """Background task to run matching."""
     try:
-        await run_matching(session_id, university, research_interests, file_ids)
+        await run_matching(
+            session_id=session_id,
+            university=university,
+            research_interests=research_interests,
+            file_ids=file_ids,
+        )
     except Exception as e:
         logger.exception(f"Matching failed: {e}")
-        session = await get_session(session_id)
+        session = await get_session(session_id=session_id)
         if session:
-            # Calculate total time on failure
             total_time = time.time() - session.get("match_start_time", time.time())
             session["match_status"] = "failed"
             session["current_step"] = f"Error: {str(e)[:100]}"
             session["total_match_time"] = total_time
-            await set_session(session_id, session)
+            await set_session(session_id=session_id, data=session)
 
 
 @router.post("", response_model=MatchStatusResponse)
 async def start_match(request: MatchRequest, background_tasks: BackgroundTasks):
     """Initiate matching process."""
-    session = await get_session(request.session_id)
+    session = await get_session(session_id=request.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -75,7 +79,7 @@ async def start_match(request: MatchRequest, background_tasks: BackgroundTasks):
     session["match_progress"] = 0
     session["current_step"] = "Initializing"
     session["match_start_time"] = time.time()
-    await set_session(request.session_id, session)
+    await set_session(session_id=request.session_id, data=session)
 
     background_tasks.add_task(
         run_matching_task,
@@ -96,18 +100,15 @@ async def start_match(request: MatchRequest, background_tasks: BackgroundTasks):
 @router.get("/{match_id}/status", response_model=MatchStatusResponse)
 async def get_match_status(match_id: str, session_id: str):
     """Check matching progress."""
-    session = await get_session(session_id)
+    session = await get_session(session_id=session_id)
     if not session or session.get("match_id") != match_id:
         raise HTTPException(status_code=404, detail="Match not found")
 
-    # Calculate elapsed time
     elapsed_time = None
     if session.get("match_start_time"):
         if session.get("total_match_time"):
-            # Completed - use final time
             elapsed_time = session["total_match_time"]
         else:
-            # Still running - calculate current elapsed time
             elapsed_time = time.time() - session["match_start_time"]
 
     return MatchStatusResponse(
@@ -122,7 +123,7 @@ async def get_match_status(match_id: str, session_id: str):
 @router.get("/{match_id}/results", response_model=MatchResultsResponse)
 async def get_match_results(match_id: str, session_id: str):
     """Retrieve match results."""
-    session = await get_session(session_id)
+    session = await get_session(session_id=session_id)
     if not session or session.get("match_id") != match_id:
         raise HTTPException(status_code=404, detail="Match not found")
 

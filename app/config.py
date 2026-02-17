@@ -8,7 +8,6 @@ class Settings(BaseSettings):
     app_name: str = "ProfMatch"
     debug: bool = False
 
-    redis_url: str = "redis://localhost:6379"
     database_url: str = "postgresql+asyncpg://localhost:5432/profmatch"
 
     cors_origins: list[str] = [

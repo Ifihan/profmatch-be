@@ -3,7 +3,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.services.redis import delete_session, get_session, set_session
+from app.services.session_store import delete_session, get_session, set_session
 from app.utils.storage import cleanup_old_sessions, delete_session_files
 
 router = APIRouter(prefix="/api/session", tags=["session"])
@@ -27,14 +27,14 @@ class SessionData(BaseModel):
 async def create_session():
     """Create a new matching session."""
     session_id = str(uuid4())
-    await set_session(session_id, {"status": "created"})
+    await set_session(session_id=session_id, data={"status": "created"})
     return SessionResponse(session_id=session_id)
 
 
 @router.get("/{session_id}", response_model=SessionData)
 async def get_session_data(session_id: str):
     """Get session status and data."""
-    data = await get_session(session_id)
+    data = await get_session(session_id=session_id)
     if not data:
         raise HTTPException(status_code=404, detail="Session not found")
     return SessionData(session_id=session_id, **data)
@@ -43,7 +43,7 @@ async def get_session_data(session_id: str):
 @router.delete("/{session_id}")
 async def delete_session_data(session_id: str):
     """Delete session and associated data."""
-    deleted = await delete_session(session_id)
+    deleted = await delete_session(session_id=session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found")
 

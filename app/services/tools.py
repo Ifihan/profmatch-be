@@ -31,7 +31,7 @@ JINA_READER_URL = "https://r.jina.ai/"
 
 
 async def search_scholar(
-    name: str, affiliation: str | None = None
+    *, name: str, affiliation: str | None = None
 ) -> list[dict]:
     """Search for an author on Semantic Scholar."""
     async with httpx.AsyncClient() as client:
@@ -58,7 +58,7 @@ async def search_scholar(
 
 
 async def get_publications(
-    scholar_id: str, limit: int = 20, years: int = 5
+    *, scholar_id: str, limit: int = 20, years: int = 5
 ) -> list[dict]:
     """Get an author's recent publications from Semantic Scholar."""
     async with httpx.AsyncClient() as client:
@@ -95,7 +95,7 @@ async def get_publications(
         ]
 
 
-async def get_citation_metrics(scholar_id: str) -> dict:
+async def get_citation_metrics(*, scholar_id: str) -> dict:
     """Get citation metrics for an author from Semantic Scholar."""
     async with httpx.AsyncClient() as client:
         resp = await client.get(
@@ -121,7 +121,7 @@ async def get_citation_metrics(scholar_id: str) -> dict:
 # ===================================================================
 
 
-async def scrape_google_scholar_metrics(google_scholar_url: str) -> dict:
+async def scrape_google_scholar_metrics(*, google_scholar_url: str) -> dict:
     """Scrape citation metrics from a Google Scholar profile page."""
     if not google_scholar_url:
         return {"error": "No Google Scholar URL provided"}
@@ -169,7 +169,7 @@ async def scrape_google_scholar_metrics(google_scholar_url: str) -> dict:
 # ===================================================================
 
 
-async def search_web(query: str, num_results: int = 5) -> list[str]:
+async def search_web(*, query: str, num_results: int = 5) -> list[str]:
     """Search the web using Serper.dev. Returns list of URLs."""
     if not settings.serper_api_key:
         logger.warning("SERPER_API_KEY not configured")
@@ -196,7 +196,7 @@ async def search_web(query: str, num_results: int = 5) -> list[str]:
 
 
 async def search_google_scholar(
-    query: str, num_results: int = 5
+    *, query: str, num_results: int = 5
 ) -> list[dict]:
     """Search Google Scholar using Serper.dev. Returns list of result dicts."""
     if not settings.serper_api_key:
@@ -219,11 +219,11 @@ async def search_google_scholar(
 
 
 async def find_google_scholar_url(
-    professor_name: str, domain: str
+    *, professor_name: str, domain: str
 ) -> str | None:
     """Search for a professor's Google Scholar profile URL via Serper."""
     query = f'"{professor_name}" {domain}'
-    results = await search_google_scholar(query, num_results=3)
+    results = await search_google_scholar(query=query, num_results=3)
     for result in results:
         link = result.get("link", "")
         if "scholar.google.com" in link and "user=" in link:
@@ -236,7 +236,7 @@ async def find_google_scholar_url(
 # ===================================================================
 
 
-async def fetch_page_content(url: str) -> str:
+async def fetch_page_content(*, url: str) -> str:
     """Fetch and extract page content.
 
     Uses Jina.ai Reader for clean markdown extraction.
@@ -264,10 +264,10 @@ async def fetch_page_content(url: str) -> str:
                 f"Jina Reader failed for {url}, falling back to httpx: {e}"
             )
 
-    return await _fetch_page_raw(url)
+    return await _fetch_page_raw(url=url)
 
 
-async def _fetch_page_raw(url: str) -> str:
+async def _fetch_page_raw(*, url: str) -> str:
     """Fallback: fetch page with httpx and do basic text extraction."""
     headers = {
         "User-Agent": (
@@ -322,7 +322,7 @@ async def _fetch_page_raw(url: str) -> str:
 # ===================================================================
 
 
-def extract_text_from_file(file_path: str) -> str:
+def extract_text_from_file(*, file_path: str) -> str:
     """Extract raw text from PDF, DOCX, or TXT file."""
     path = Path(file_path)
     ext = path.suffix.lower()
