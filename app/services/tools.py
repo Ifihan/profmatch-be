@@ -8,7 +8,6 @@ No LLM involvement — these are direct HTTP calls to:
 - Local document text extraction (pypdf, python-docx)
 """
 
-import logging
 import re
 from datetime import datetime
 from pathlib import Path
@@ -17,8 +16,6 @@ import httpx
 from bs4 import BeautifulSoup
 
 from app.config import settings
-
-logger = logging.getLogger(__name__)
 
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1"
 SERPER_API_URL = "https://google.serper.dev"
@@ -172,8 +169,7 @@ async def scrape_google_scholar_metrics(*, google_scholar_url: str) -> dict:
 async def search_web(*, query: str, num_results: int = 5) -> list[str]:
     """Search the web using Serper.dev. Returns list of URLs."""
     if not settings.serper_api_key:
-        logger.warning("SERPER_API_KEY not configured")
-        return []
+        raise ValueError("SERPER_API_KEY not configured")
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -190,8 +186,9 @@ async def search_web(*, query: str, num_results: int = 5) -> list[str]:
                 if url and url not in urls:
                     urls.append(url)
             return urls
-    except Exception as e:
-        logger.error(f"Serper search failed: {e}")
+    except ValueError:
+        raise
+    except Exception:
         return []
 
 
@@ -200,8 +197,7 @@ async def search_google_scholar(
 ) -> list[dict]:
     """Search Google Scholar using Serper.dev. Returns list of result dicts."""
     if not settings.serper_api_key:
-        logger.warning("SERPER_API_KEY not configured")
-        return []
+        raise ValueError("SERPER_API_KEY not configured")
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -213,8 +209,9 @@ async def search_google_scholar(
             resp.raise_for_status()
             data = resp.json()
             return data.get("organic", [])
-    except Exception as e:
-        logger.error(f"Serper Scholar search failed: {e}")
+    except ValueError:
+        raise
+    except Exception:
         return []
 
 
@@ -259,10 +256,8 @@ async def fetch_page_content(*, url: str) -> str:
                 content = data.get("data", {}).get("content", "")
                 if content:
                     return content[:25000]
-        except Exception as e:
-            logger.warning(
-                f"Jina Reader failed for {url}, falling back to httpx: {e}"
-            )
+        except Exception:
+            pass
 
     return await _fetch_page_raw(url=url)
 

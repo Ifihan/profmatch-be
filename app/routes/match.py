@@ -1,41 +1,13 @@
-import logging
 import time
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
-from pydantic import BaseModel
 
-from app.models import MatchResult
+from app.models import MatchRequest, MatchResult, MatchResultsResponse, MatchStatusResponse
 from app.services.orchestrator import run_matching
 from app.services.session_store import get_session, set_session
 
-logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/match", tags=["match"])
-
-
-class MatchRequest(BaseModel):
-    """Request to start matching process."""
-    session_id: str
-    university: str
-    research_interests: list[str]
-    file_ids: list[str] = []
-
-
-class MatchStatusResponse(BaseModel):
-    """Match progress status."""
-    match_id: str
-    status: str
-    progress: int
-    current_step: str | None = None
-    elapsed_time: float | None = None  # Time in seconds
-
-
-class MatchResultsResponse(BaseModel):
-    """Match results response."""
-    match_id: str
-    status: str
-    results: list[MatchResult] = []
-    total_time: float | None = None  # Total matching time in seconds
 
 
 async def run_matching_task(
@@ -53,9 +25,7 @@ async def run_matching_task(
             file_ids=file_ids,
         )
     except Exception as e:
-        logger.exception(f"Matching failed: {e}")
-        session = await get_session(session_id=session_id)
-        if session:
+        if session := await get_session(session_id=session_id):
             total_time = time.time() - session.get("match_start_time", time.time())
             session["match_status"] = "failed"
             session["current_step"] = f"Error: {str(e)[:100]}"
@@ -66,8 +36,7 @@ async def run_matching_task(
 @router.post("", response_model=MatchStatusResponse)
 async def start_match(request: MatchRequest, background_tasks: BackgroundTasks):
     """Initiate matching process."""
-    session = await get_session(session_id=request.session_id)
-    if not session:
+    if not (session := await get_session(session_id=request.session_id)):
         raise HTTPException(status_code=404, detail="Session not found")
 
     match_id = str(uuid4())
@@ -83,10 +52,10 @@ async def start_match(request: MatchRequest, background_tasks: BackgroundTasks):
 
     background_tasks.add_task(
         run_matching_task,
-        request.session_id,
-        request.university,
-        request.research_interests,
-        request.file_ids,
+        session_id=request.session_id,
+        university=request.university,
+        research_interests=request.research_interests,
+        file_ids=request.file_ids,
     )
 
     return MatchStatusResponse(
@@ -100,8 +69,7 @@ async def start_match(request: MatchRequest, background_tasks: BackgroundTasks):
 @router.get("/{match_id}/status", response_model=MatchStatusResponse)
 async def get_match_status(match_id: str, session_id: str):
     """Check matching progress."""
-    session = await get_session(session_id=session_id)
-    if not session or session.get("match_id") != match_id:
+    if not (session := await get_session(session_id=session_id)) or session.get("match_id") != match_id:
         raise HTTPException(status_code=404, detail="Match not found")
 
     elapsed_time = None
@@ -123,19 +91,15 @@ async def get_match_status(match_id: str, session_id: str):
 @router.get("/{match_id}/results", response_model=MatchResultsResponse)
 async def get_match_results(match_id: str, session_id: str):
     """Retrieve match results."""
-    session = await get_session(session_id=session_id)
-    if not session or session.get("match_id") != match_id:
+    if not (session := await get_session(session_id=session_id)) or session.get("match_id") != match_id:
         raise HTTPException(status_code=404, detail="Match not found")
 
     if session.get("match_status") != "completed":
         raise HTTPException(status_code=400, detail="Matching not yet completed")
 
-    results = session.get("match_results", [])
-    total_time = session.get("total_match_time")
-
     return MatchResultsResponse(
         match_id=match_id,
         status="completed",
-        results=[MatchResult(**r) for r in results],
-        total_time=total_time,
+        results=[MatchResult(**r) for r in session.get("match_results", [])],
+        total_time=session.get("total_match_time"),
     )

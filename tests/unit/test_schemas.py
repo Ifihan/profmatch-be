@@ -1,6 +1,6 @@
 """Unit tests for app/models/schemas.py Pydantic models."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -82,7 +82,7 @@ class TestProfessorProfile:
             id=uuid4(),
             name="Dr. Test",
             university="MIT",
-            last_updated=datetime.utcnow(),
+            last_updated=datetime.now(UTC),
         )
         assert profile.name == "Dr. Test"
         assert profile.university == "MIT"
@@ -92,7 +92,7 @@ class TestProfessorProfile:
 
     def test_full_profile(self):
         """Profile with all fields."""
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         profile = ProfessorProfile(
             id=uuid4(),
             name="Dr. Test",
@@ -119,7 +119,7 @@ class TestProfessorProfile:
                 name="Dr. Test",
                 university="MIT",
                 email="not-an-email",
-                last_updated=datetime.utcnow(),
+                last_updated=datetime.now(UTC),
             )
 
 
@@ -202,7 +202,7 @@ class TestMatchResult:
             id=uuid4(),
             name="Dr. Test",
             university="MIT",
-            last_updated=datetime.utcnow(),
+            last_updated=datetime.now(UTC),
         )
         match = MatchResult(
             professor=professor,
@@ -222,7 +222,7 @@ class TestMatchResult:
             id=uuid4(),
             name="Dr. Test",
             university="MIT",
-            last_updated=datetime.utcnow(),
+            last_updated=datetime.now(UTC),
         )
         # Note: schema doesn't enforce 0-100 range
         match = MatchResult(

@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 from urllib.parse import urlparse
@@ -72,24 +72,30 @@ async def run_matching(
 
         await update_progress(session_id=session_id, progress=15, step="Fetching faculty directory")
 
-        faculty_data = await fetch_faculty(
+        faculty_data, faculty_warnings = await fetch_faculty(
             university=university, research_interests=research_interests
         )
         wide_event["faculty_found"] = len(faculty_data)
+        if faculty_warnings:
+            wide_event["faculty_warnings"] = faculty_warnings
 
         await update_progress(session_id=session_id, progress=25, step="Filtering candidates")
 
-        faculty_data = await filter_faculty_by_relevance(
+        faculty_data, filter_fallback = await filter_faculty_by_relevance(
             faculty_data=faculty_data, research_interests=research_interests
         )
         wide_event["faculty_filtered"] = len(faculty_data)
+        if filter_fallback:
+            wide_event["filter_fallback"] = True
 
         await update_progress(session_id=session_id, progress=30, step="Retrieving publication data")
 
-        professors = await enrich_professors(
+        professors, enrichment_errors = await enrich_professors(
             faculty_data=faculty_data, university=university
         )
         wide_event["professors_enriched"] = len(professors)
+        if enrichment_errors:
+            wide_event["enrichment_errors"] = enrichment_errors
 
         await update_progress(session_id=session_id, progress=70, step="Analyzing research alignment")
 
@@ -315,11 +321,14 @@ async def fetch_faculty(
 
     seen_urls: set[str] = set()
     search_pairs: list[tuple[str, str]] = []
+    warnings = []
     for interest, result in zip(research_interests[:3], discovery_results):
         if isinstance(result, Exception):
-            logger.warning(
-                f"Faculty URL discovery failed for '{interest}': {result}"
-            )
+            warnings.append({
+                "stage": "url_discovery",
+                "interest": interest,
+                "error": str(result),
+            })
             continue
         for url in result:
             if url not in seen_urls:
@@ -327,11 +336,8 @@ async def fetch_faculty(
                 search_pairs.append((url, interest))
 
     async def search_one(url: str, interest: str) -> list[dict]:
-        logger.info(f"Searching faculty for interest: {interest} at {url}")
-
         cached = await get_cached_faculty(source_url=url)
         if cached is not None:
-            logger.info(f"Cache hit for faculty page: {url}")
             faculty_dicts = cached
         else:
             faculty_keywords = [
@@ -354,12 +360,18 @@ async def fetch_faculty(
                     if found_url:
                         faculty_url = found_url
                     else:
-                        logger.warning(
-                            f"Could not find faculty directory at {url}"
-                        )
+                        warnings.append({
+                            "stage": "directory_discovery",
+                            "url": url,
+                            "error": "no faculty directory found",
+                        })
                         return []
                 except Exception as e:
-                    logger.warning(f"Faculty directory discovery failed: {e}")
+                    warnings.append({
+                        "stage": "directory_discovery",
+                        "url": url,
+                        "error": str(e),
+                    })
                     return []
 
             try:
@@ -374,7 +386,11 @@ async def fetch_faculty(
                     members=faculty_dicts,
                 )
             except Exception as e:
-                logger.warning(f"Faculty extraction failed at {url}: {e}")
+                warnings.append({
+                    "stage": "faculty_extraction",
+                    "url": url,
+                    "error": str(e),
+                })
                 return []
 
         stopwords = {
@@ -404,7 +420,6 @@ async def fetch_faculty(
         sorted_faculty = [f for f, _ in scored]
 
         valid = [f for f in sorted_faculty if isinstance(f, dict) and f.get("name")]
-        logger.info(f"Found {len(valid)} faculty members at {url}")
         return valid
 
     fetch_tasks = [search_one(url, interest) for url, interest in search_pairs]
@@ -423,16 +438,18 @@ async def fetch_faculty(
             seen_names.add(name)
             unique_faculty.append(f)
 
-    logger.info(f"Total unique faculty found: {len(unique_faculty)}")
-    return unique_faculty
+    return unique_faculty, warnings
 
 
 async def filter_faculty_by_relevance(
     *, faculty_data: list[dict[str, Any]], research_interests: list[str]
-) -> list[dict[str, Any]]:
-    """Use LLM to filter faculty list to the most relevant candidates."""
+) -> tuple[list[dict[str, Any]], bool]:
+    """Use LLM to filter faculty list to the most relevant candidates.
+
+    Returns (selected_faculty, used_fallback).
+    """
     if len(faculty_data) <= 30:
-        return faculty_data
+        return faculty_data, False
 
     interests_str = ", ".join(research_interests)
 
@@ -458,15 +475,11 @@ async def filter_faculty_by_relevance(
             if isinstance(i, int) and 0 <= i < len(faculty_data)
         ]
         if selected:
-            logger.info(
-                f"LLM filtered {len(faculty_data)} faculty down to {len(selected)}"
-            )
-            return selected
+            return selected, False
     except Exception:
         pass
 
-    logger.warning("LLM filtering failed, falling back to first 30")
-    return faculty_data[:30]
+    return faculty_data[:30], True
 
 
 async def enrich_single_professor(
@@ -481,7 +494,10 @@ async def enrich_single_professor(
     if cached:
         return cached
 
-    candidates = await tools.search_scholar(name=name)
+    try:
+        candidates = await tools.search_scholar(name=name)
+    except Exception:
+        candidates = []
 
     scholar = None
     if candidates:
@@ -528,7 +544,7 @@ async def enrich_single_professor(
             email=faculty.get("email") or extra_data.get("email"),
             research_areas=research_areas,
             publications=[],
-            last_updated=datetime.utcnow(),
+            last_updated=datetime.now(UTC),
         )
         await cache_professor(profile=prof)
         return prof
@@ -570,7 +586,7 @@ async def enrich_single_professor(
         research_areas=research_areas,
         publications=publications,
         citation_metrics=citation_metrics,
-        last_updated=datetime.utcnow(),
+        last_updated=datetime.now(UTC),
     )
 
     await cache_professor(profile=prof)
@@ -579,8 +595,11 @@ async def enrich_single_professor(
 
 async def enrich_professors(
     *, faculty_data: list[dict[str, Any]], university: str
-) -> list[ProfessorProfile]:
-    """Enrich professor profiles with publication data (concurrent)."""
+) -> tuple[list[ProfessorProfile], list[dict]]:
+    """Enrich professor profiles with publication data (concurrent).
+
+    Returns (professors, errors).
+    """
     domain = _extract_domain(university)
     parts = domain.lower().split(".")
     ignore = {
@@ -605,11 +624,18 @@ async def enrich_professors(
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     professors = []
-    for result in results:
+    errors = []
+    for faculty, result in zip(faculty_data, results):
         if isinstance(result, ProfessorProfile):
             professors.append(result)
+        elif isinstance(result, Exception):
+            errors.append({
+                "name": faculty.get("name", "unknown"),
+                "error_type": type(result).__name__,
+                "error_message": str(result),
+            })
 
-    return professors
+    return professors, errors
 
 
 async def _extract_research_areas(

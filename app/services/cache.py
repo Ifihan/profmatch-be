@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -16,7 +16,7 @@ async def get_cached_professor(*, name: str, university: str) -> ProfessorProfil
         stmt = select(ProfessorCache).where(
             ProfessorCache.name == name,
             ProfessorCache.university == university,
-            ProfessorCache.updated_at > datetime.utcnow() - timedelta(days=CACHE_TTL_DAYS),
+            ProfessorCache.updated_at > datetime.now(UTC) - timedelta(days=CACHE_TTL_DAYS),
         )
         result = await session.execute(stmt)
         cached = result.scalar_one_or_none()
@@ -24,7 +24,7 @@ async def get_cached_professor(*, name: str, university: str) -> ProfessorProfil
         if not cached:
             return None
 
-        return _cache_to_profile(cached)
+        return cache_to_profile(cached)
 
 
 async def get_cached_professor_by_scholar_id(*, scholar_id: str) -> ProfessorProfile | None:
@@ -32,7 +32,7 @@ async def get_cached_professor_by_scholar_id(*, scholar_id: str) -> ProfessorPro
     async with async_session() as session:
         stmt = select(ProfessorCache).where(
             ProfessorCache.scholar_id == scholar_id,
-            ProfessorCache.updated_at > datetime.utcnow() - timedelta(days=CACHE_TTL_DAYS),
+            ProfessorCache.updated_at > datetime.now(UTC) - timedelta(days=CACHE_TTL_DAYS),
         )
         result = await session.execute(stmt)
         cached = result.scalar_one_or_none()
@@ -40,7 +40,7 @@ async def get_cached_professor_by_scholar_id(*, scholar_id: str) -> ProfessorPro
         if not cached:
             return None
 
-        return _cache_to_profile(cached)
+        return cache_to_profile(cached)
 
 
 async def cache_professor(*, profile: ProfessorProfile) -> None:
@@ -62,7 +62,7 @@ async def cache_professor(*, profile: ProfessorProfile) -> None:
             existing.research_areas = profile.research_areas
             existing.publications = [p.model_dump() for p in profile.publications]
             existing.citation_metrics = profile.citation_metrics.model_dump() if profile.citation_metrics else None
-            existing.updated_at = datetime.utcnow()
+            existing.updated_at = datetime.now(UTC)
         else:
             cached = ProfessorCache(
                 id=str(profile.id),
@@ -87,12 +87,12 @@ async def get_cached_professors_by_university(*, university: str) -> list[Profes
     async with async_session() as session:
         stmt = select(ProfessorCache).where(
             ProfessorCache.university == university,
-            ProfessorCache.updated_at > datetime.utcnow() - timedelta(days=CACHE_TTL_DAYS),
+            ProfessorCache.updated_at > datetime.now(UTC) - timedelta(days=CACHE_TTL_DAYS),
         )
         result = await session.execute(stmt)
         cached_list = result.scalars().all()
 
-        return [_cache_to_profile(c) for c in cached_list]
+        return [cache_to_profile(c) for c in cached_list]
 
 
 # --- Faculty cache ---
@@ -103,7 +103,7 @@ async def get_cached_faculty(*, source_url: str) -> list[dict[str, Any]] | None:
     async with async_session() as session:
         stmt = select(FacultyCache).where(
             FacultyCache.source_url == source_url,
-            FacultyCache.updated_at > datetime.utcnow() - timedelta(days=CACHE_TTL_DAYS),
+            FacultyCache.updated_at > datetime.now(UTC) - timedelta(days=CACHE_TTL_DAYS),
         )
         result = await session.execute(stmt)
         rows = result.scalars().all()
@@ -181,7 +181,7 @@ async def update_professor_google_scholar(
             await session.commit()
 
 
-def _cache_to_profile(cached: ProfessorCache) -> ProfessorProfile:
+def cache_to_profile(cached: ProfessorCache) -> ProfessorProfile:
     """Convert cache record to ProfessorProfile."""
     publications = [Publication(**p) for p in cached.publications] if cached.publications else []
     citation_metrics = CitationMetrics(**cached.citation_metrics) if cached.citation_metrics else None

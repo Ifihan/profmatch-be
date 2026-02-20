@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncGenerator, Generator
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
@@ -61,7 +61,7 @@ def sample_professor_data() -> dict[str, Any]:
         "research_areas": ["machine learning", "NLP", "robotics"],
         "publications": [],
         "citation_metrics": {"h_index": 25, "i10_index": 40, "total_citations": 5000},
-        "last_updated": datetime.utcnow().isoformat(),
+        "last_updated": datetime.now(UTC).isoformat(),
     }
 
 
@@ -142,7 +142,7 @@ def mock_gcs_bucket():
         def __init__(self, name):
             self.name = name
             self.metadata = {}
-            self.time_created = datetime.utcnow()
+            self.time_created = datetime.now(UTC)
 
         def upload_from_string(self, content):
             blobs[self.name] = {"content": content, "metadata": self.metadata}

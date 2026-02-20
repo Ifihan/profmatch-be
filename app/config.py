@@ -1,8 +1,12 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
+
+    model_config = SettingsConfigDict(
+        env_file=(".env.production", ".env.development", ".env"),
+    )
 
     env: str = "development"
     app_name: str = "ProfMatch"
@@ -25,9 +29,6 @@ class Settings(BaseSettings):
     # Google Cloud Storage settings
     gcs_bucket_name: str = ""
     gcs_project_id: str = ""
-
-    class Config:
-        env_file = (".env.production", ".env.development", ".env")
 
 
 settings = Settings()

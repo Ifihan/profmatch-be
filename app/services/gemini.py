@@ -6,7 +6,6 @@ constrained decoding that guarantees valid output.
 """
 
 import json
-import logging
 from typing import TypeVar
 
 from google import genai
@@ -22,8 +21,6 @@ from app.models.agent_models import (
     ResearchAreasOutput,
     FacultyMember,
 )
-
-logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 

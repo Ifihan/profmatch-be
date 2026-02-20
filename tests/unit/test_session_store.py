@@ -1,6 +1,6 @@
 """Unit tests for app/services/session_store.py."""
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -156,7 +156,7 @@ class TestExpiredSessions:
             db.add(Session(
                 id="expired",
                 data={"x": 1},
-                expires_at=datetime.utcnow() - timedelta(hours=1),
+                expires_at=datetime.now(UTC) - timedelta(hours=1),
             ))
             await db.commit()
 
@@ -176,7 +176,7 @@ class TestExpiredSessions:
             db.add(Session(
                 id="old",
                 data={"old": True},
-                expires_at=datetime.utcnow() - timedelta(hours=1),
+                expires_at=datetime.now(UTC) - timedelta(hours=1),
             ))
             await db.commit()
 

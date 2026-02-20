@@ -1,7 +1,6 @@
 """PostgreSQL-backed session store."""
 
-import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -10,12 +9,10 @@ from app.config import settings
 from app.models.database import Session
 from app.services.database import async_session
 
-logger = logging.getLogger(__name__)
-
 
 async def set_session(*, session_id: str, data: dict[str, Any]) -> None:
     """Store session data (upsert with TTL refresh)."""
-    expires_at = datetime.utcnow() + timedelta(hours=settings.session_ttl_hours)
+    expires_at = datetime.now(UTC) + timedelta(hours=settings.session_ttl_hours)
     async with async_session() as db:
         stmt = select(Session).where(Session.id == session_id)
         result = await db.execute(stmt)
@@ -35,7 +32,7 @@ async def get_session(*, session_id: str) -> dict[str, Any] | None:
     async with async_session() as db:
         stmt = select(Session).where(
             Session.id == session_id,
-            Session.expires_at > datetime.utcnow(),
+            Session.expires_at > datetime.now(UTC),
         )
         result = await db.execute(stmt)
         row = result.scalar_one_or_none()
@@ -54,7 +51,7 @@ async def delete_session(*, session_id: str) -> bool:
 async def delete_expired_sessions() -> int:
     """Delete all expired sessions. Returns count deleted."""
     async with async_session() as db:
-        stmt = delete(Session).where(Session.expires_at <= datetime.utcnow())
+        stmt = delete(Session).where(Session.expires_at <= datetime.now(UTC))
         result = await db.execute(stmt)
         await db.commit()
         return result.rowcount
