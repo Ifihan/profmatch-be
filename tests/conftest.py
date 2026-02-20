@@ -182,7 +182,6 @@ async def test_app() -> AsyncGenerator[AsyncClient, None]:
         "DATABASE_URL": "sqlite+aiosqlite:///:memory:",
         "GEMINI_API_KEY": "test-key",
         "SERPER_API_KEY": "test-serper-key",
-        "JINA_API_KEY": "test-jina-key",
         "GCS_BUCKET_NAME": "test-bucket",
         "GCS_PROJECT_ID": "test-project",
     }):

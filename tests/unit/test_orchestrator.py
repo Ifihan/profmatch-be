@@ -2,7 +2,14 @@
 
 import pytest
 
-from app.services.orchestrator import to_str, to_list, to_int, _extract_domain
+from app.services.orchestrator import (
+    to_str,
+    to_list,
+    to_int,
+    _extract_domain,
+    filter_faculty_by_relevance,
+    _compute_topic_score,
+)
 
 
 class TestToStr:
@@ -174,3 +181,122 @@ class TestExtractDomain:
     def test_invalid_url_returns_empty(self):
         """Invalid URL returns empty string (graceful failure)."""
         assert _extract_domain("not a url") == ""
+
+
+class TestComputeTopicScore:
+    """Tests for _compute_topic_score helper."""
+
+    def test_exact_topic_match(self):
+        """Exact topic name match scores high."""
+        faculty = {
+            "topic_details": [
+                {
+                    "name": "Machine Learning",
+                    "subfield": "Artificial Intelligence",
+                    "field": "Computer Science",
+                    "domain": "Technology",
+                },
+            ],
+        }
+        score = _compute_topic_score(
+            faculty=faculty,
+            interest_tokens={"machine", "learning"},
+            interest_phrases=["machine learning"],
+        )
+        assert score > 0
+
+    def test_no_match_returns_zero(self):
+        """Unrelated topics score zero."""
+        faculty = {
+            "topic_details": [
+                {
+                    "name": "Marine Biology",
+                    "subfield": "Ecology",
+                    "field": "Biology",
+                    "domain": "Life Sciences",
+                },
+            ],
+        }
+        score = _compute_topic_score(
+            faculty=faculty,
+            interest_tokens={"quantum", "computing"},
+            interest_phrases=["quantum computing"],
+        )
+        assert score == 0.0
+
+    def test_plain_topics_fallback(self):
+        """Falls back to plain topic name matching when no topic_details."""
+        faculty = {"topics": ["Natural Language Processing", "Deep Learning"]}
+        score = _compute_topic_score(
+            faculty=faculty,
+            interest_tokens={"deep", "learning"},
+            interest_phrases=["deep learning"],
+        )
+        assert score > 0
+
+    def test_scraped_faculty_keyword_match(self):
+        """Falls back to keyword matching on name/title/department."""
+        faculty = {
+            "name": "Dr. Jane Smith",
+            "title": "Professor of Machine Learning",
+            "department": "Computer Science",
+        }
+        score = _compute_topic_score(
+            faculty=faculty,
+            interest_tokens={"machine", "learning"},
+            interest_phrases=["machine learning"],
+        )
+        assert score > 0
+
+    def test_empty_faculty_scores_zero(self):
+        """Faculty with no data scores zero."""
+        score = _compute_topic_score(
+            faculty={},
+            interest_tokens={"ai"},
+            interest_phrases=["artificial intelligence"],
+        )
+        assert score == 0.0
+
+
+class TestFilterFacultyByRelevance:
+    """Tests for filter_faculty_by_relevance."""
+
+    def test_small_list_returned_as_is(self):
+        """Lists <= 30 returned unchanged."""
+        faculty = [{"name": f"Prof {i}"} for i in range(20)]
+        result = filter_faculty_by_relevance(
+            faculty_data=faculty, research_interests=["machine learning"]
+        )
+        assert len(result) == 20
+
+    def test_large_list_filtered_to_30(self):
+        """Lists > 30 filtered to top 30."""
+        faculty = [
+            {"name": f"Prof {i}", "topics": [f"Topic {i}"]}
+            for i in range(50)
+        ]
+        # add one with matching topic
+        faculty[0]["topics"] = ["Machine Learning"]
+        result = filter_faculty_by_relevance(
+            faculty_data=faculty, research_interests=["machine learning"]
+        )
+        assert len(result) == 30
+        # the matching professor should be first
+        assert result[0]["topics"] == ["Machine Learning"]
+
+    def test_openalex_topics_scored_higher(self):
+        """Faculty with OpenAlex topic details scored higher than plain keywords."""
+        faculty = [{"name": f"Prof {i}"} for i in range(35)]
+        faculty[30]["topic_details"] = [
+            {
+                "name": "Machine Learning",
+                "subfield": "Artificial Intelligence",
+                "field": "Computer Science",
+                "domain": "Technology",
+            },
+        ]
+        result = filter_faculty_by_relevance(
+            faculty_data=faculty, research_interests=["machine learning"]
+        )
+        # the one with topic_details should rank first
+        assert result[0] == faculty[30]

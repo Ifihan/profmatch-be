@@ -24,7 +24,6 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
     serper_api_key: str = ""
-    jina_api_key: str = ""
 
     # Google Cloud Storage settings
     gcs_bucket_name: str = ""

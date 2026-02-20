@@ -18,7 +18,6 @@ from app.models.agent_models import (
     MatchOutput,
     ParsedCV,
     ProfessorPageOutput,
-    ResearchAreasOutput,
     FacultyMember,
 )
 
@@ -162,25 +161,6 @@ async def filter_faculty(
             "members (each with an index number, name, title, and department) "
             "and research interests, select the 30 most relevant professors. "
             "Return their index numbers in the selected_indices field."
-        ),
-    )
-
-
-# ===================================================================
-# Research Area Extraction
-# ===================================================================
-
-
-async def extract_research_areas(titles_str: str) -> ResearchAreasOutput:
-    """Extract research areas from publication titles."""
-    prompt = f"Extract research areas from these publications:\n{titles_str}"
-    return await _generate_structured(
-        prompt=prompt,
-        schema=ResearchAreasOutput,
-        system_instruction=(
-            "You are a research topic analyst. Given publication titles, "
-            "extract 3-7 concise research areas. Use short, specific phrases "
-            "like 'computer vision', 'natural language processing'."
         ),
     )
 

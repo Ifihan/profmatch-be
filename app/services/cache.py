@@ -27,20 +27,18 @@ async def get_cached_professor(*, name: str, university: str) -> ProfessorProfil
         return cache_to_profile(cached)
 
 
-async def get_cached_professor_by_scholar_id(*, scholar_id: str) -> ProfessorProfile | None:
-    """Get professor from cache by Scholar ID."""
+async def get_cached_professor_by_openalex_id(*, openalex_id: str) -> ProfessorProfile | None:
+    """Get professor from cache by OpenAlex ID."""
     async with async_session() as session:
         stmt = select(ProfessorCache).where(
-            ProfessorCache.scholar_id == scholar_id,
+            ProfessorCache.openalex_id == openalex_id,
             ProfessorCache.updated_at > datetime.now(UTC) - timedelta(days=CACHE_TTL_DAYS),
         )
         result = await session.execute(stmt)
-        cached = result.scalar_one_or_none()
+        if cached := result.scalar_one_or_none():
+            return cache_to_profile(cached)
+        return None
 
-        if not cached:
-            return None
-
-        return cache_to_profile(cached)
 
 
 async def cache_professor(*, profile: ProfessorProfile) -> None:
@@ -58,6 +56,7 @@ async def cache_professor(*, profile: ProfessorProfile) -> None:
             existing.title = profile.title
             existing.email = profile.email
             existing.scholar_id = profile.scholar_id
+            existing.openalex_id = profile.openalex_id
             existing.google_scholar_url = profile.google_scholar_url
             existing.research_areas = profile.research_areas
             existing.publications = [p.model_dump() for p in profile.publications]
@@ -72,6 +71,7 @@ async def cache_professor(*, profile: ProfessorProfile) -> None:
                 title=profile.title,
                 email=profile.email,
                 scholar_id=profile.scholar_id,
+                openalex_id=profile.openalex_id,
                 google_scholar_url=profile.google_scholar_url,
                 research_areas=profile.research_areas,
                 publications=[p.model_dump() for p in profile.publications],
@@ -142,44 +142,6 @@ async def cache_faculty(
         await session.commit()
 
 
-# --- Google Scholar helpers ---
-
-
-async def get_professor_google_scholar_url(
-    *, name: str, university: str
-) -> str | None:
-    """Get cached Google Scholar URL from professor_cache."""
-    async with async_session() as session:
-        stmt = select(ProfessorCache.google_scholar_url).where(
-            ProfessorCache.name == name,
-            ProfessorCache.university == university,
-        )
-        result = await session.execute(stmt)
-        url = result.scalar_one_or_none()
-        return url if url else None
-
-
-async def update_professor_google_scholar(
-    *,
-    name: str,
-    university: str,
-    google_scholar_url: str,
-    citation_metrics: dict[str, Any] | None = None,
-) -> None:
-    """Update Google Scholar URL and optionally citation metrics on professor_cache."""
-    async with async_session() as session:
-        stmt = select(ProfessorCache).where(
-            ProfessorCache.name == name,
-            ProfessorCache.university == university,
-        )
-        result = await session.execute(stmt)
-        existing = result.scalar_one_or_none()
-        if existing:
-            existing.google_scholar_url = google_scholar_url
-            if citation_metrics:
-                existing.citation_metrics = citation_metrics
-            await session.commit()
-
 
 def cache_to_profile(cached: ProfessorCache) -> ProfessorProfile:
     """Convert cache record to ProfessorProfile."""
@@ -194,6 +156,7 @@ def cache_to_profile(cached: ProfessorCache) -> ProfessorProfile:
         title=cached.title,
         email=cached.email,
         scholar_id=cached.scholar_id,
+        openalex_id=cached.openalex_id,
         google_scholar_url=cached.google_scholar_url,
         research_areas=cached.research_areas or [],
         publications=publications,
