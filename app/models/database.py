@@ -27,8 +27,8 @@ class ProfessorCache(Base):
     publications: Mapped[list] = mapped_column(JSON, default=list)
     citation_metrics: Mapped[dict | None] = mapped_column(JSON)
     profile_url: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
 
 class Session(Base):
@@ -37,8 +37,8 @@ class Session(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     data: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
-    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 
 class FacultyCache(Base):
@@ -54,5 +54,5 @@ class FacultyCache(Base):
     source_url: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     university: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     openalex_institution_id: Mapped[str | None] = mapped_column(String(255))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
