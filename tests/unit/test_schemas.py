@@ -1,6 +1,6 @@
 """Unit tests for app/models/schemas.py Pydantic models."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -82,7 +82,7 @@ class TestProfessorProfile:
             id=uuid4(),
             name="Dr. Test",
             university="MIT",
-            last_updated=datetime.utcnow(),
+            last_updated=datetime.now(UTC),
         )
         assert profile.name == "Dr. Test"
         assert profile.university == "MIT"
@@ -92,7 +92,7 @@ class TestProfessorProfile:
 
     def test_full_profile(self):
         """Profile with all fields."""
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         profile = ProfessorProfile(
             id=uuid4(),
             name="Dr. Test",
@@ -100,7 +100,6 @@ class TestProfessorProfile:
             department="Computer Science",
             university="MIT",
             email="test@mit.edu",
-            scholar_id="ABC123",
             google_scholar_url="https://scholar.google.com/...",
             research_areas=["AI", "ML"],
             publications=[Publication(title="Paper", authors=["Dr. Test"], year=2023)],
@@ -111,16 +110,16 @@ class TestProfessorProfile:
         assert len(profile.publications) == 1
         assert profile.citation_metrics.h_index == 25
 
-    def test_invalid_email_rejected(self):
-        """Invalid email format is rejected."""
-        with pytest.raises(ValidationError):
-            ProfessorProfile(
-                id=uuid4(),
-                name="Dr. Test",
-                university="MIT",
-                email="not-an-email",
-                last_updated=datetime.utcnow(),
-            )
+    def test_email_is_plain_string(self):
+        """Email field accepts any string (no format validation)."""
+        prof = ProfessorProfile(
+            id=uuid4(),
+            name="Dr. Test",
+            university="MIT",
+            email="not-an-email",
+            last_updated=datetime.now(UTC),
+        )
+        assert prof.email == "not-an-email"
 
 
 class TestEducation:
@@ -202,7 +201,7 @@ class TestMatchResult:
             id=uuid4(),
             name="Dr. Test",
             university="MIT",
-            last_updated=datetime.utcnow(),
+            last_updated=datetime.now(UTC),
         )
         match = MatchResult(
             professor=professor,
@@ -222,7 +221,7 @@ class TestMatchResult:
             id=uuid4(),
             name="Dr. Test",
             university="MIT",
-            last_updated=datetime.utcnow(),
+            last_updated=datetime.now(UTC),
         )
         # Note: schema doesn't enforce 0-100 range
         match = MatchResult(

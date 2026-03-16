@@ -1,4 +1,4 @@
-import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 
@@ -7,18 +7,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.config import settings
+from app.models import HealthResponse
 from app.middleware import TimingMiddleware
 from app.routes import match, professor, session, upload
 from app.services.cleanup import start_cleanup_task, stop_cleanup_task
 from app.services.database import close_db, init_db
-from app.services.mcp_client import (
-    DocumentClient,
-    ScholarClient,
-    SearchClient,
-    UniversityClient,
-    server_manager,
-)
-from app.services.redis import close_redis
+from app.services.openalex import close_client as close_openalex
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,34 +20,14 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info(f"Starting ProfMatch in {settings.env} environment")
+    logger.info(json.dumps({"event": "app_startup", "env": settings.env}))
     await init_db()
-
-    await asyncio.gather(
-        server_manager.start_server(UniversityClient.SERVER_SCRIPT),
-        server_manager.start_server(ScholarClient.SERVER_SCRIPT),
-        server_manager.start_server(DocumentClient.SERVER_SCRIPT),
-        server_manager.start_server(SearchClient.SERVER_SCRIPT),
-    )
-    logging.info("All MCP servers started in parallel")
-
-    # Start background cleanup task
     await start_cleanup_task()
 
     yield
 
-    # Stop cleanup task
     await stop_cleanup_task()
-
-    # Close MCP servers (suppress shutdown errors)
-    try:
-        await server_manager.close_all()
-    except Exception:
-        # Suppress MCP shutdown errors - known issue with stdio clients
-        # Servers are properly terminated via process cleanup
-        pass
-
-    await close_redis()
+    await close_openalex()
     await close_db()
 
 
@@ -84,6 +58,12 @@ app.add_middleware(
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Handle uncaught exceptions."""
+    logger.error(json.dumps({
+        "event": "unhandled_exception",
+        "method": request.method,
+        "path": request.url.path,
+        "error": {"type": type(exc).__name__, "message": str(exc)},
+    }))
     return JSONResponse(
         status_code=500,
         content={"detail": "Internal server error"},
@@ -96,7 +76,7 @@ async def root():
     return RedirectResponse(url="/docs")
 
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint."""
-    return {"status": "healthy"}
+    return HealthResponse(status="healthy")

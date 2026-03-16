@@ -3,19 +3,30 @@
 import pytest
 from unittest.mock import patch, AsyncMock
 
-from app.services import redis as redis_module
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.models.database import Base
+
+# In-memory SQLite for integration tests
+_test_engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+_test_session_maker = async_sessionmaker(_test_engine, class_=AsyncSession, expire_on_commit=False)
 
 
 @pytest.fixture(autouse=True)
-def reset_redis_state():
-    """Reset redis module state before each test."""
-    redis_module.redis_client = None
-    redis_module.use_memory_store = True  # Use memory store for tests
-    redis_module.memory_store.clear()
+async def setup_db():
+    """Create tables before each test, drop after."""
+    async with _test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
     yield
-    redis_module.redis_client = None
-    redis_module.use_memory_store = False
-    redis_module.memory_store.clear()
+    async with _test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+
+
+@pytest.fixture(autouse=True)
+def patch_session_store():
+    """Redirect session_store to use the in-memory DB."""
+    with patch("app.services.session_store.async_session", _test_session_maker):
+        yield
 
 
 class TestCreateSession:
@@ -37,9 +48,10 @@ class TestCreateSession:
         response = await test_app.post("/api/session")
         session_id = response.json()["session_id"]
 
-        # Verify session was stored
-        key = f"session:{session_id}"
-        assert key in redis_module.memory_store
+        # Verify session was stored by fetching it
+        get_response = await test_app.get(f"/api/session/{session_id}")
+        assert get_response.status_code == 200
+        assert get_response.json()["status"] == "created"
 
 
 class TestGetSession:

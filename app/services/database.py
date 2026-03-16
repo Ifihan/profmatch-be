@@ -1,4 +1,6 @@
+import json
 import logging
+from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -13,19 +15,18 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 
 async def init_db() -> None:
     """Create database tables."""
-    # remove try block when done
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database initialized successfully")
+        logger.info(json.dumps({"event": "database_initialized"}))
     except Exception as e:
-        logger.warning(f"Database initialization skipped: {e}")
+        logger.warning(json.dumps({"event": "database_init_skipped", "error": str(e)}))
 
 
-async def get_db() -> AsyncSession:
+async def get_db() -> AsyncGenerator[AsyncSession]:
     """Get database session."""
     async with async_session() as session:
-        return session
+        yield session
 
 
 async def close_db() -> None:

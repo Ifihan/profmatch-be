@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
 
 class Publication(BaseModel):
@@ -29,9 +29,11 @@ class ProfessorProfile(BaseModel):
     title: str | None = None
     department: str | None = None
     university: str
-    email: EmailStr | None = None
-    scholar_id: str | None = None
+    email: str | None = None
+    openalex_id: str | None = None
     google_scholar_url: str | None = None
+    directory_url: str | None = None
+    website: str | None = None
     research_areas: list[str] = []
     publications: list[Publication] = []
     citation_metrics: CitationMetrics | None = None
@@ -74,3 +76,65 @@ class MatchResult(BaseModel):
     relevant_publications: list[Publication] = []
     shared_keywords: list[str] = []
     recommendation_text: str
+
+
+class MatchRequest(BaseModel):
+    """Request to start matching process."""
+    session_id: str
+    university: str
+    research_interests: list[str]
+    file_ids: list[str] = []
+
+
+class MatchStatusResponse(BaseModel):
+    """Match progress status."""
+    match_id: str
+    status: str
+    progress: int
+    current_step: str | None = None
+    elapsed_time: float | None = None
+
+
+class MatchResultsResponse(BaseModel):
+    """Match results response."""
+    match_id: str
+    status: str
+    results: list[MatchResult] = []
+    total_time: float | None = None
+
+
+class SessionResponse(BaseModel):
+    """Session creation response."""
+    session_id: str
+
+
+class SessionData(BaseModel):
+    """Session data response."""
+    session_id: str
+    university: str | None = None
+    research_interests: list[str] = []
+    file_ids: list[str] = []
+    status: str = "created"
+
+
+class UploadResponse(BaseModel):
+    """File upload response."""
+    file_id: str
+    filename: str
+
+
+class MessageResponse(BaseModel):
+    """Generic message response."""
+    message: str
+
+
+class CleanupResponse(BaseModel):
+    """Cleanup endpoint response."""
+    message: str
+    sessions_cleaned: int
+    ttl_hours: int
+
+
+class HealthResponse(BaseModel):
+    """Health check response."""
+    status: str

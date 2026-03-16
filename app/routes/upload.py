@@ -1,19 +1,13 @@
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel
 
 from app.config import settings
-from app.services.redis import get_session, set_session
+from app.models import UploadResponse
+from app.services.session_store import get_session, set_session
 from app.utils.storage import save_file, validate_extension
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 
 MAX_SIZE = settings.max_upload_size_mb * 1024 * 1024
-
-
-class UploadResponse(BaseModel):
-    """File upload response."""
-    file_id: str
-    filename: str
 
 
 @router.post("", response_model=UploadResponse)
@@ -22,8 +16,7 @@ async def upload_file(
     file: UploadFile = File(...),
 ):
     """Upload CV or supporting document."""
-    session = await get_session(session_id)
-    if not session:
+    if not (session := await get_session(session_id=session_id)):
         raise HTTPException(status_code=404, detail="Session not found")
 
     if not file.filename:
@@ -41,6 +34,6 @@ async def upload_file(
     file_ids = session.get("file_ids", [])
     file_ids.append(file_id)
     session["file_ids"] = file_ids
-    await set_session(session_id, session)
+    await set_session(session_id=session_id, data=session)
 
     return UploadResponse(file_id=file_id, filename=file.filename)
