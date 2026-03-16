@@ -100,7 +100,6 @@ class TestProfessorProfile:
             department="Computer Science",
             university="MIT",
             email="test@mit.edu",
-            scholar_id="ABC123",
             google_scholar_url="https://scholar.google.com/...",
             research_areas=["AI", "ML"],
             publications=[Publication(title="Paper", authors=["Dr. Test"], year=2023)],
@@ -111,16 +110,16 @@ class TestProfessorProfile:
         assert len(profile.publications) == 1
         assert profile.citation_metrics.h_index == 25
 
-    def test_invalid_email_rejected(self):
-        """Invalid email format is rejected."""
-        with pytest.raises(ValidationError):
-            ProfessorProfile(
-                id=uuid4(),
-                name="Dr. Test",
-                university="MIT",
-                email="not-an-email",
-                last_updated=datetime.now(UTC),
-            )
+    def test_email_is_plain_string(self):
+        """Email field accepts any string (no format validation)."""
+        prof = ProfessorProfile(
+            id=uuid4(),
+            name="Dr. Test",
+            university="MIT",
+            email="not-an-email",
+            last_updated=datetime.now(UTC),
+        )
+        assert prof.email == "not-an-email"
 
 
 class TestEducation:

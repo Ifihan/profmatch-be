@@ -30,9 +30,10 @@ class ProfessorProfile(BaseModel):
     department: str | None = None
     university: str
     email: str | None = None
-    scholar_id: str | None = None
     openalex_id: str | None = None
     google_scholar_url: str | None = None
+    directory_url: str | None = None
+    website: str | None = None
     research_areas: list[str] = []
     publications: list[Publication] = []
     citation_metrics: CitationMetrics | None = None

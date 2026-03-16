@@ -55,9 +55,10 @@ async def cache_professor(*, profile: ProfessorProfile) -> None:
             existing.department = profile.department
             existing.title = profile.title
             existing.email = profile.email
-            existing.scholar_id = profile.scholar_id
             existing.openalex_id = profile.openalex_id
             existing.google_scholar_url = profile.google_scholar_url
+            existing.directory_url = profile.directory_url
+            existing.website = profile.website
             existing.research_areas = profile.research_areas
             existing.publications = [p.model_dump() for p in profile.publications]
             existing.citation_metrics = profile.citation_metrics.model_dump() if profile.citation_metrics else None
@@ -70,9 +71,10 @@ async def cache_professor(*, profile: ProfessorProfile) -> None:
                 department=profile.department,
                 title=profile.title,
                 email=profile.email,
-                scholar_id=profile.scholar_id,
                 openalex_id=profile.openalex_id,
                 google_scholar_url=profile.google_scholar_url,
+                directory_url=profile.directory_url,
+                website=profile.website,
                 research_areas=profile.research_areas,
                 publications=[p.model_dump() for p in profile.publications],
                 citation_metrics=profile.citation_metrics.model_dump() if profile.citation_metrics else None,
@@ -155,9 +157,10 @@ def cache_to_profile(cached: ProfessorCache) -> ProfessorProfile:
         department=cached.department,
         title=cached.title,
         email=cached.email,
-        scholar_id=cached.scholar_id,
         openalex_id=cached.openalex_id,
         google_scholar_url=cached.google_scholar_url,
+        directory_url=cached.directory_url,
+        website=cached.website,
         research_areas=cached.research_areas or [],
         publications=publications,
         citation_metrics=citation_metrics,

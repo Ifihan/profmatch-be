@@ -57,7 +57,6 @@ def sample_professor_data() -> dict[str, Any]:
         "department": "Computer Science",
         "university": "MIT",
         "email": "john.doe@mit.edu",
-        "scholar_id": "ABC123",
         "research_areas": ["machine learning", "NLP", "robotics"],
         "publications": [],
         "citation_metrics": {"h_index": 25, "i10_index": 40, "total_citations": 5000},

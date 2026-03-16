@@ -7,12 +7,16 @@ No LLM involvement -- these are direct HTTP calls to:
 """
 
 import asyncio
+import logging
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 SERPER_API_URL = "https://google.serper.dev"
 
@@ -112,8 +116,6 @@ async def _fetch_page_raw(*, url: str) -> str:
     def _replace_link(match: re.Match) -> str:
         href = match.group(1)
         content = re.sub(r"<[^>]+>", "", match.group(2)).strip()
-        from urllib.parse import urlparse
-
         if not href.startswith(("http", "https", "mailto:", "tel:")):
             if href.startswith("/"):
                 parsed = urlparse(url)
@@ -159,3 +161,101 @@ def extract_text_from_file(*, file_path: str) -> str:
             return f.read()
     else:
         raise ValueError(f"Unsupported file type: {ext}")
+
+
+# ===================================================================
+# Professor Supplementary Lookups (Google Scholar, Email, Homepage)
+# ===================================================================
+
+_EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+
+
+async def _serper_search_with_snippets(
+    *, query: str, num_results: int = 3
+) -> list[dict]:
+    """Search using Serper.dev and return full result dicts (link, title, snippet)."""
+    if not settings.serper_api_key:
+        return []
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{SERPER_API_URL}/search",
+                json={"q": query, "num": num_results},
+                headers={"X-API-KEY": settings.serper_api_key},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return resp.json().get("organic", [])
+    except Exception:
+        return []
+
+
+async def search_google_scholar_url(*, name: str, university: str) -> str | None:
+    """Search for a professor's Google Scholar profile URL.
+
+    Returns the Google Scholar citations URL or None if not found.
+    """
+    query = f'"{name}" site:scholar.google.com'
+    results = await _serper_search_with_snippets(query=query, num_results=3)
+
+    for result in results:
+        url = result.get("link", "")
+        if "scholar.google.com/citations" in url:
+            logger.debug("found Google Scholar URL for %s: %s", name, url)
+            return url
+
+    return None
+
+
+async def search_professor_contact(
+    *, name: str, university_domain: str
+) -> dict[str, str | None]:
+    """Search for a professor's email and homepage on their university site.
+
+    Returns dict with 'email' and 'homepage' keys (values may be None).
+    """
+    domain = urlparse(
+        university_domain if "://" in university_domain else f"https://{university_domain}"
+    ).netloc.replace("www.", "")
+
+    query = f'"{name}" site:{domain}'
+    results = await _serper_search_with_snippets(query=query, num_results=5)
+
+    email = None
+    homepage = None
+
+    # Patterns that indicate directory/listing pages (not personal profiles)
+    listing_patterns = ["?page=", "/search/", "/search?", "lastname=", "firstname="]
+
+    for result in results:
+        url = result.get("link", "")
+        snippet = result.get("snippet", "")
+
+        # Extract homepage — prefer URLs with professor name in path,
+        # skip generic directory/listing pages
+        if not homepage and domain in url:
+            url_lower = url.lower()
+            if not any(p in url_lower for p in listing_patterns):
+                homepage = url
+
+        # Extract email from snippets
+        if not email:
+            emails_found = _EMAIL_PATTERN.findall(snippet)
+            for e in emails_found:
+                if domain in e:
+                    email = e
+                    break
+
+    # If no email in snippets, try fetching the homepage content
+    if not email and homepage:
+        try:
+            html = await _fetch_html(url=homepage)
+            emails_found = _EMAIL_PATTERN.findall(html)
+            for e in emails_found:
+                if domain in e:
+                    email = e
+                    break
+        except Exception:
+            pass
+
+    return {"email": email, "homepage": homepage}

@@ -39,8 +39,8 @@ class TestReconstructAbstract:
     def test_none_returns_none(self):
         assert _reconstruct_abstract(None) is None
 
-    def test_empty_dict_returns_empty(self):
-        assert _reconstruct_abstract({}) == ""
+    def test_empty_dict_returns_none(self):
+        assert _reconstruct_abstract({}) is None
 
     def test_simple_reconstruction(self):
         inverted_index = {"the": [0], "cat": [1], "sat": [2]}

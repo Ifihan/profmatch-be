@@ -71,12 +71,13 @@ async def run_matching(
                 research_interests=research_interests,
             )
 
-        student_profile, (faculty_data, faculty_warnings) = await asyncio.gather(
+        student_profile, (faculty_data, faculty_warnings, institution_name) = await asyncio.gather(
             _parse_cv_if_needed(),
             fetch_faculty(university=university, research_interests=research_interests),
         )
         wide_event["student_profile_parsed"] = student_profile is not None
         wide_event["faculty_found"] = len(faculty_data)
+        wide_event["institution_name"] = institution_name
         wide_event["faculty_source"] = "openalex" if not faculty_warnings else "mixed"
         if faculty_warnings:
             wide_event["faculty_warnings"] = faculty_warnings
@@ -94,8 +95,13 @@ async def run_matching(
             session_id=session_id, progress=30, step="Retrieving publication data"
         )
 
+        # Use institution display name for professor profiles
+        display_university = institution_name or university
+
         professors, enrichment_errors = await enrich_professors(
-            faculty_data=faculty_data, university=university
+            faculty_data=faculty_data,
+            university=display_university,
+            university_url=university,
         )
         wide_event["professors_enriched"] = len(professors)
         if enrichment_errors:
@@ -111,6 +117,14 @@ async def run_matching(
             student_profile=student_profile,
         )
         wide_event["matches_generated"] = len(matches)
+
+        await update_progress(
+            session_id=session_id, progress=85, step="Fetching supplementary data"
+        )
+
+        # Post-match: fetch supplementary data (email, Google Scholar, website)
+        # only for the selected top matches — saves ~80% of Serper API calls
+        await post_enrich_matches(matches=matches, university_url=university)
 
         await update_progress(
             session_id=session_id, progress=95, step="Finalizing recommendations"
@@ -284,20 +298,21 @@ def _extract_domain(url: str) -> str:
 
 async def fetch_faculty(
     *, university: str, research_interests: list[str]
-) -> tuple[list[dict[str, Any]], list[dict]]:
+) -> tuple[list[dict[str, Any]], list[dict], str | None]:
     """Fetch faculty using OpenAlex, falling back to web scraping.
 
-    Returns (faculty_list, warnings).
+    Returns (faculty_list, warnings, institution_display_name).
     """
     warnings: list[dict] = []
+    institution_name: str | None = None
 
     try:
-        faculty, openalex_warnings = await _fetch_faculty_openalex(
+        faculty, openalex_warnings, institution_name = await _fetch_faculty_openalex(
             university=university, research_interests=research_interests
         )
         warnings.extend(openalex_warnings)
         if faculty:
-            return faculty, warnings
+            return faculty, warnings, institution_name
     except Exception as e:
         warnings.append({
             "stage": "openalex_discovery",
@@ -310,18 +325,18 @@ async def fetch_faculty(
             university=university, research_interests=research_interests
         )
         warnings.extend(scraping_warnings)
-        return faculty, warnings
+        return faculty, warnings, institution_name
     except Exception as e:
         warnings.append({
             "stage": "scraping_fallback",
             "error": str(e),
         })
-        return [], warnings
+        return [], warnings, institution_name
 
 
 async def _fetch_faculty_openalex(
     *, university: str, research_interests: list[str]
-) -> tuple[list[dict[str, Any]], list[dict]]:
+) -> tuple[list[dict[str, Any]], list[dict], str | None]:
     """Discover faculty via OpenAlex institution + author search."""
     warnings: list[dict] = []
 
@@ -331,20 +346,67 @@ async def _fetch_faculty_openalex(
             "stage": "openalex_institution",
             "error": f"could not resolve institution: {university}",
         })
-        return [], warnings
+        return [], warnings, None
 
+    institution_id = institution["id"]
+    institution_name = institution["display_name"]
+    logger.info(
+        "resolved institution: %s (id=%s)", institution_name, institution_id
+    )
+
+    # Try with topic filter first
     authors = await openalex.get_authors_by_institution(
-        institution_id=institution["id"],
+        institution_id=institution_id,
         topics=research_interests,
         limit=50,
     )
 
+    # If topic-filtered search returns too few results, retry without topic filter
+    if len(authors) < 10:
+        logger.info(
+            "topic-filtered search returned only %d authors, retrying without topic filter",
+            len(authors),
+        )
+        broader_authors = await openalex.get_authors_by_institution(
+            institution_id=institution_id,
+            topics=None,
+            limit=50,
+        )
+        # Merge: topic-matched first, then broader results (deduped)
+        seen_ids = {a["openalex_id"] for a in authors}
+        for a in broader_authors:
+            if a["openalex_id"] not in seen_ids:
+                authors.append(a)
+                seen_ids.add(a["openalex_id"])
+
     if not authors:
         warnings.append({
             "stage": "openalex_authors",
-            "error": "no authors found for institution + topics",
+            "error": "no authors found for institution",
         })
-        return [], warnings
+        return [], warnings, institution_name
+
+    # Filter: only keep authors whose primary institution matches
+    verified_authors = []
+    for a in authors:
+        institutions = a.get("last_known_institutions", [])
+        if not institutions:
+            continue
+        # Check if the target institution is the primary (first) affiliation
+        primary_id = institutions[0].get("id", "")
+        if primary_id == institution_id:
+            verified_authors.append(a)
+        elif any(inst.get("id") == institution_id for inst in institutions):
+            # Also include if it's a secondary affiliation
+            verified_authors.append(a)
+
+    if not verified_authors and authors:
+        # If verification filtered everyone out, use unfiltered (edge case)
+        logger.warning(
+            "institution verification filtered all %d authors, using unfiltered",
+            len(authors),
+        )
+        verified_authors = authors
 
     faculty = [
         {
@@ -362,10 +424,14 @@ async def _fetch_faculty_openalex(
             "works_count": a["works_count"],
             "orcid": a["orcid"],
         }
-        for a in authors
+        for a in verified_authors
     ]
 
-    return faculty, warnings
+    logger.info(
+        "OpenAlex discovery: %d authors found, %d after verification",
+        len(authors), len(faculty),
+    )
+    return faculty, warnings, institution_name
 
 
 async def _discover_faculty_url(*, university: str, interest: str) -> list[str]:
@@ -518,6 +584,17 @@ async def _fetch_faculty_fallback(
 # ===================================================================
 
 
+_INELIGIBLE_TITLE_KEYWORDS = {"visiting", "adjunct", "emeritus", "honorary"}
+
+
+def _is_eligible_faculty(title: str | None) -> bool:
+    """Check if a faculty member is eligible (not visiting/adjunct/emeritus/honorary)."""
+    if not title:
+        return True
+    title_lower = title.lower()
+    return not any(kw in title_lower for kw in _INELIGIBLE_TITLE_KEYWORDS)
+
+
 def filter_faculty_by_relevance(
     *, faculty_data: list[dict[str, Any]], research_interests: list[str]
 ) -> list[dict[str, Any]]:
@@ -525,8 +602,12 @@ def filter_faculty_by_relevance(
 
     Uses OpenAlex topic hierarchy when available (domain > field > subfield > topic).
     Falls back to keyword matching on name/title/department for scraped faculty.
+    Excludes visiting/adjunct/emeritus/honorary faculty.
     Returns top 30 by score.
     """
+    # Remove ineligible faculty first
+    faculty_data = [f for f in faculty_data if _is_eligible_faculty(f.get("title"))]
+
     if len(faculty_data) <= 30:
         return faculty_data
 
@@ -623,7 +704,11 @@ def _compute_topic_score(
 
 
 async def enrich_single_professor(
-    *, faculty: dict[str, Any], university: str
+    *,
+    faculty: dict[str, Any],
+    university: str,
+    university_url: str,
+    all_works: dict[str, list[dict]] | None = None,
 ) -> ProfessorProfile | None:
     """Enrich a single professor profile with publication and citation data."""
     name = faculty.get("name", "")
@@ -641,21 +726,36 @@ async def enrich_single_professor(
 
     # OpenAlex primary path: author already has metrics from discovery
     if openalex_id:
-        return await _enrich_from_openalex(faculty=faculty, university=university)
+        return await _enrich_from_openalex(
+            faculty=faculty,
+            university=university,
+            university_url=university_url,
+            pre_fetched_works=all_works.get(openalex_id) if all_works else None,
+        )
 
-    # fallback: scrape professor profile page
-    return await _enrich_from_scraping(faculty=faculty, university=university)
+    # fallback: scrape professor profile page, try OpenAlex name lookup
+    return await _enrich_from_scraping(
+        faculty=faculty, university=university, university_url=university_url
+    )
 
 
 async def _enrich_from_openalex(
-    *, faculty: dict[str, Any], university: str
+    *,
+    faculty: dict[str, Any],
+    university: str,
+    university_url: str,
+    pre_fetched_works: list[dict] | None = None,
 ) -> ProfessorProfile:
     """Enrich professor using OpenAlex works API."""
     openalex_id = faculty["openalex_id"]
 
-    works = await openalex.get_author_works(
-        author_id=openalex_id, limit=20, years=5
-    )
+    # Use pre-fetched works if available (from batch), otherwise fetch individually
+    if pre_fetched_works is not None:
+        works = pre_fetched_works
+    else:
+        works = await openalex.get_author_works(
+            author_id=openalex_id, limit=20, years=5
+        )
 
     publications = [
         Publication(
@@ -671,7 +771,7 @@ async def _enrich_from_openalex(
     ]
 
     # research areas come from OpenAlex topics (already in the author record)
-    research_areas = faculty.get("topics", [])[:7]
+    research_areas = _clean_research_areas(faculty.get("topics", [])[:7])
 
     citation_metrics = CitationMetrics(
         h_index=faculty.get("h_index", 0),
@@ -698,9 +798,12 @@ async def _enrich_from_openalex(
 
 
 async def _enrich_from_scraping(
-    *, faculty: dict[str, Any], university: str
+    *, faculty: dict[str, Any], university: str, university_url: str
 ) -> ProfessorProfile:
-    """Fallback enrichment: scrape professor profile page with Gemini."""
+    """Fallback enrichment: scrape professor profile page with Gemini.
+
+    Also attempts OpenAlex name lookup to get publications and citation metrics.
+    """
     name = faculty["name"]
     profile_url = faculty.get("profile_url")
     extra_data: dict = {}
@@ -715,9 +818,53 @@ async def _enrich_from_scraping(
         except Exception:
             pass
 
+    # Try OpenAlex name lookup to get publications and citations
+    publications: list[Publication] = []
+    citation_metrics: CitationMetrics | None = None
+    openalex_id: str | None = None
+    openalex_topics: list[str] = []
+
+    try:
+        # Resolve institution for name search
+        institution = await openalex.resolve_institution(query=university_url or university)
+        institution_id = institution["id"] if institution else None
+
+        author = await openalex.search_author_by_name(
+            name=name, institution_id=institution_id
+        )
+        if author:
+            openalex_id = author["openalex_id"]
+            openalex_topics = author.get("topics", [])[:7]
+            citation_metrics = CitationMetrics(
+                h_index=author.get("h_index", 0),
+                i10_index=author.get("i10_index", 0),
+                total_citations=author.get("cited_by_count", 0),
+            )
+            works = await openalex.get_author_works(
+                author_id=openalex_id, limit=20, years=5
+            )
+            publications = [
+                Publication(
+                    title=w.get("title", ""),
+                    authors=w.get("authors", []),
+                    year=w.get("publication_year", 0),
+                    venue=w.get("venue"),
+                    abstract=w.get("abstract"),
+                    citation_count=w.get("citation_count", 0),
+                    url=w.get("doi"),
+                )
+                for w in works
+            ]
+    except Exception as e:
+        logger.debug("OpenAlex name lookup failed for %s: %s", name, e)
+
+    # Use OpenAlex topics if available, otherwise scraped research areas
     research_areas = extra_data.get("research_areas") or []
     if isinstance(research_areas, str):
         research_areas = [r.strip() for r in research_areas.split(",") if r.strip()]
+    if openalex_topics:
+        research_areas = openalex_topics
+    research_areas = _clean_research_areas(research_areas)
 
     prof = ProfessorProfile(
         id=uuid4(),
@@ -726,27 +873,71 @@ async def _enrich_from_scraping(
         department=faculty.get("department") or extra_data.get("department"),
         university=university,
         email=faculty.get("email") or extra_data.get("email"),
+        openalex_id=openalex_id,
         research_areas=research_areas,
-        publications=[],
+        publications=publications,
+        citation_metrics=citation_metrics,
         last_updated=datetime.now(UTC),
     )
     await cache_professor(profile=prof)
     return prof
 
 
+def _clean_research_areas(areas: list[str]) -> list[str]:
+    """Filter out low-quality research area entries."""
+    stopwords = {
+        "the", "of", "and", "for", "a", "an", "in", "to", "on", "with",
+        "is", "are", "was", "were", "be", "been", "being",
+    }
+    cleaned = []
+    for area in areas:
+        if not area or not isinstance(area, str):
+            continue
+        area = area.strip()
+        # Skip very short entries
+        if len(area) < 3:
+            continue
+        # Skip if it's just a stopword
+        if area.lower() in stopwords:
+            continue
+        cleaned.append(area)
+    return cleaned
+
+
 async def enrich_professors(
-    *, faculty_data: list[dict[str, Any]], university: str
+    *,
+    faculty_data: list[dict[str, Any]],
+    university: str,
+    university_url: str,
 ) -> tuple[list[ProfessorProfile], list[dict]]:
     """Enrich professor profiles with publication data (concurrent).
 
+    Uses batched OpenAlex works API for professors with openalex_ids.
     Returns (professors, errors).
     """
+    # Batch-fetch works for all OpenAlex professors at once
+    openalex_ids = [
+        f["openalex_id"] for f in faculty_data
+        if f.get("openalex_id")
+    ]
+    all_works: dict[str, list[dict]] = {}
+    if openalex_ids:
+        try:
+            all_works = await openalex.get_works_for_authors(
+                author_ids=openalex_ids, limit_per_author=20, years=5
+            )
+        except Exception as e:
+            logger.warning("batch works fetch failed, falling back to individual: %s", e)
+
     semaphore = asyncio.Semaphore(20)
 
     async def enrich_with_limit(faculty: dict[str, Any]) -> ProfessorProfile | None:
         async with semaphore:
             return await enrich_single_professor(
-                faculty=faculty, university=university
+                faculty=faculty,
+                university=university,
+                university_url=university_url,
+                all_works=all_works,
             )
 
     tasks = [enrich_with_limit(f) for f in faculty_data]
@@ -764,7 +955,102 @@ async def enrich_professors(
                 "error_message": str(result),
             })
 
+    # Post-process: detect and clear duplicate research areas (page-level noise)
+    _deduplicate_research_areas(professors)
+
     return professors, errors
+
+
+def _deduplicate_research_areas(professors: list[ProfessorProfile]) -> None:
+    """Detect research areas that are identical across 3+ professors (page-level noise).
+
+    Clears the research_areas for affected professors.
+    """
+    if len(professors) < 3:
+        return
+
+    # Count how many professors share the exact same research areas list
+    from collections import Counter
+    area_counts: Counter[str] = Counter()
+    for p in professors:
+        if p.research_areas:
+            key = "|".join(sorted(a.lower() for a in p.research_areas))
+            area_counts[key] += 1
+
+    # Find noise patterns (same areas shared by 3+ professors)
+    noise_keys = {key for key, count in area_counts.items() if count >= 3}
+    if not noise_keys:
+        return
+
+    logger.info("detected %d noise research area patterns, clearing affected professors", len(noise_keys))
+    for p in professors:
+        if p.research_areas:
+            key = "|".join(sorted(a.lower() for a in p.research_areas))
+            if key in noise_keys:
+                p.research_areas = []
+
+
+# ===================================================================
+# Post-Match Supplementary Enrichment (Serper — only for selected matches)
+# ===================================================================
+
+
+async def post_enrich_matches(
+    *, matches: list[MatchResult], university_url: str
+) -> None:
+    """Fetch supplementary data for matched professors only.
+
+    Runs Serper lookups (Google Scholar URL, email, directory_url) concurrently
+    for only the selected top matches, not all candidates.
+    """
+    if not matches:
+        return
+
+    domain = _extract_domain(university_url) if university_url else ""
+
+    async def enrich_one(match: MatchResult) -> None:
+        prof = match.professor
+        name = prof.name
+        university = prof.university
+
+        # Skip lookups for data we already have
+        need_scholar = not prof.google_scholar_url
+        need_contact = not prof.email or not prof.directory_url
+
+        tasks = {}
+        if need_scholar:
+            tasks["scholar"] = tools.search_google_scholar_url(
+                name=name, university=university
+            )
+        if need_contact and domain:
+            tasks["contact"] = tools.search_professor_contact(
+                name=name, university_domain=domain
+            )
+
+        if not tasks:
+            return
+
+        results = await asyncio.gather(
+            *tasks.values(), return_exceptions=True
+        )
+        result_map = dict(zip(tasks.keys(), results))
+
+        if "scholar" in result_map:
+            scholar_url = result_map["scholar"]
+            if isinstance(scholar_url, str):
+                prof.google_scholar_url = scholar_url
+
+        if "contact" in result_map:
+            contact_info = result_map["contact"]
+            if isinstance(contact_info, dict):
+                if not prof.email:
+                    prof.email = contact_info.get("email")
+                if not prof.directory_url:
+                    prof.directory_url = contact_info.get("homepage")
+
+    await asyncio.gather(
+        *(enrich_one(m) for m in matches), return_exceptions=True
+    )
 
 
 # ===================================================================
@@ -822,11 +1108,21 @@ async def generate_matches(
             if not prof:
                 continue
 
-            relevant_pubs = [
-                p
-                for p in prof.publications
-                if p.title in m.relevant_publication_titles
-            ]
+            # Fuzzy match: case-insensitive substring matching for publications
+            relevant_pubs = []
+            gemini_titles_lower = [t.lower() for t in m.relevant_publication_titles]
+            for p in prof.publications:
+                p_title_lower = p.title.lower()
+                for gt in gemini_titles_lower:
+                    if gt in p_title_lower or p_title_lower in gt:
+                        relevant_pubs.append(p)
+                        break
+
+            # Fallback: if no fuzzy matches, use top publications by citation count
+            if not relevant_pubs and prof.publications:
+                relevant_pubs = sorted(
+                    prof.publications, key=lambda x: x.citation_count, reverse=True
+                )[:5]
 
             matches.append(
                 MatchResult(
