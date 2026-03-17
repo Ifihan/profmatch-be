@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field
 
 
 class Publication(BaseModel):
@@ -138,3 +138,69 @@ class CleanupResponse(BaseModel):
 class HealthResponse(BaseModel):
     """Health check response."""
     status: str
+
+
+# --- Auth schemas ---
+
+class SignupRequest(BaseModel):
+    """User signup request."""
+    email: EmailStr
+    password: str = Field(min_length=8)
+    name: str = Field(min_length=1)
+    session_id: str | None = None
+
+
+class LoginRequest(BaseModel):
+    """User login request."""
+    email: EmailStr
+    password: str
+    session_id: str | None = None
+
+
+class ForgotPasswordRequest(BaseModel):
+    """Forgot password request."""
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    """Reset password request."""
+    token: str
+    new_password: str = Field(min_length=8)
+
+
+class UserResponse(BaseModel):
+    """User info returned in auth responses."""
+    id: str
+    email: str
+    name: str
+    created_at: datetime
+
+
+class AuthResponse(BaseModel):
+    """Auth response with token."""
+    user: UserResponse
+    access_token: str
+    token_type: str = "bearer"
+
+
+# --- Search history schemas ---
+
+class SearchHistorySummary(BaseModel):
+    """Summary of a saved search (for listing)."""
+    id: str
+    match_id: str
+    university: str
+    research_interests: list[str] = []
+    result_count: int
+    created_at: datetime
+
+
+class SearchHistoryDetail(BaseModel):
+    """Full search with results."""
+    id: str
+    match_id: str
+    university: str
+    research_interests: list[str] = []
+    results: list[MatchResult] = []
+    total_time: float | None = None
+    created_at: datetime
