@@ -30,6 +30,7 @@ from app.services.auth import (
     verify_password,
     verify_reset_token,
 )
+from app.services.credits import get_or_create_credits
 from app.services.database import async_session
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,9 @@ async def signup(body: SignupRequest):
         raise HTTPException(status_code=409, detail="Email already registered")
 
     user = await create_user(email=body.email, password=body.password, name=body.name)
+
+    # Initialize search credits (3 free credits)
+    await get_or_create_credits(user.id)
 
     if body.session_id:
         await link_session_to_user(session_id=body.session_id, user_id=user.id)

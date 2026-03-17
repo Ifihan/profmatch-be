@@ -82,6 +82,40 @@ class SearchHistory(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 
+class SearchCredit(Base):
+    """Search credit balance for a user."""
+    __tablename__ = "search_credit"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+    user_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("user.id"), nullable=False, unique=True, index=True)
+    balance: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    last_free_credit_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+
+
+class SearchUsage(Base):
+    """Audit log of credit-consuming searches."""
+    __tablename__ = "search_usage"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+    user_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("user.id"), nullable=False, index=True)
+    match_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    university: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
+class AnonymousUsage(Base):
+    """Tracks anonymous search count per IP address."""
+    __tablename__ = "anonymous_usage"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+    ip_address: Mapped[str] = mapped_column(String(45), unique=True, index=True, nullable=False)
+    search_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+
+
 class FacultyCache(Base):
     """Cached faculty members discovered from university pages."""
     __tablename__ = "faculty_cache"

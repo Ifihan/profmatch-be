@@ -204,3 +204,34 @@ class SearchHistoryDetail(BaseModel):
     results: list[MatchResult] = []
     total_time: float | None = None
     created_at: datetime
+
+
+# --- Search credits schemas ---
+
+class SearchUsageItem(BaseModel):
+    """Single credit usage entry."""
+    match_id: str
+    university: str
+    created_at: datetime
+
+
+class CreditsResponse(BaseModel):
+    """User credit balance and usage."""
+    balance: int
+    next_free_credit_at: datetime | None = None
+    usage_history: list[SearchUsageItem] = []
+
+
+class PlanInfo(BaseModel):
+    """Credit purchase plan."""
+    id: str
+    name: str
+    credits: int
+    price_usd: float
+    available: bool = False
+
+
+class PlansResponse(BaseModel):
+    """Available credit plans."""
+    plans: list[PlanInfo]
+    message: str = "Credit purchases coming soon!"
