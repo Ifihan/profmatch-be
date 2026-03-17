@@ -4,10 +4,33 @@ from uuid import uuid4
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from app.models import MatchRequest, MatchResult, MatchResultsResponse, MatchStatusResponse
+from app.models.database import SearchHistory, Session
+from app.services.database import async_session
 from app.services.orchestrator import run_matching
 from app.services.session_store import get_session, set_session
 
+from sqlalchemy import select
+
 router = APIRouter(prefix="/api/match", tags=["match"])
+
+
+async def _save_search_history(session_id: str, session_data: dict) -> None:
+    """Save completed search to history if session belongs to a logged-in user."""
+    async with async_session() as db:
+        result = await db.execute(select(Session).where(Session.id == session_id))
+        session_row = result.scalar_one_or_none()
+        if not session_row or not session_row.user_id:
+            return
+
+        db.add(SearchHistory(
+            user_id=session_row.user_id,
+            match_id=session_data.get("match_id", ""),
+            university=session_data.get("university", ""),
+            research_interests=session_data.get("research_interests", []),
+            results=session_data.get("match_results", []),
+            total_time=session_data.get("total_match_time"),
+        ))
+        await db.commit()
 
 
 async def run_matching_task(
@@ -24,6 +47,10 @@ async def run_matching_task(
             research_interests=research_interests,
             file_ids=file_ids,
         )
+        # Save to search history for logged-in users
+        if session := await get_session(session_id=session_id):
+            if session.get("match_status") == "completed":
+                await _save_search_history(session_id, session)
     except Exception as e:
         if session := await get_session(session_id=session_id):
             total_time = time.time() - session.get("match_start_time", time.time())
