@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from app.config import settings
 from app.models import HealthResponse
 from app.middleware import TimingMiddleware
-from app.routes import auth, match, professor, session, upload
+from app.routes import auth, credits, match, professor, session, upload
 from app.services.cleanup import start_cleanup_task, stop_cleanup_task
 from app.services.database import close_db, init_db
 from app.services.openalex import close_client as close_openalex
@@ -39,6 +39,7 @@ app = FastAPI(
 )
 
 app.include_router(auth.router)
+app.include_router(credits.router)
 app.include_router(session.router)
 app.include_router(upload.router)
 app.include_router(match.router)

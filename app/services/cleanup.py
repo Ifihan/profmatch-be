@@ -4,8 +4,13 @@ import asyncio
 import json
 import logging
 import time
+from datetime import UTC, datetime, timedelta
+
+from sqlalchemy import delete
 
 from app.config import settings
+from app.models.database import AnonymousUsage
+from app.services.database import async_session
 from app.services.session_store import delete_expired_sessions
 from app.utils.storage import cleanup_old_sessions
 
@@ -24,6 +29,7 @@ async def cleanup_loop():
                 hours=settings.session_ttl_hours
             )
             wide_event["db_sessions_expired"] = await delete_expired_sessions()
+            wide_event["anonymous_usage_cleaned"] = await _cleanup_anonymous_usage()
             wide_event["outcome"] = "success"
         except Exception as e:
             wide_event["outcome"] = "error"
@@ -33,6 +39,17 @@ async def cleanup_loop():
                 (time.time() - wide_event["start_time"]) * 1000
             )
             logger.info(json.dumps(wide_event, default=str))
+
+
+async def _cleanup_anonymous_usage(*, days: int = 30) -> int:
+    """Remove anonymous usage rows older than `days` days."""
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    async with async_session() as db:
+        result = await db.execute(
+            delete(AnonymousUsage).where(AnonymousUsage.updated_at < cutoff)
+        )
+        await db.commit()
+        return result.rowcount
 
 
 async def start_cleanup_task():
