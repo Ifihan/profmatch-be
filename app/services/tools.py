@@ -20,6 +20,55 @@ logger = logging.getLogger(__name__)
 
 SERPER_API_URL = "https://google.serper.dev"
 
+# Shared HTTP clients (reused across requests to avoid TLS handshake overhead)
+_serper_client: httpx.AsyncClient | None = None
+_http_client: httpx.AsyncClient | None = None
+
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+def _get_serper_client() -> httpx.AsyncClient:
+    """Get or create shared Serper API client."""
+    global _serper_client
+    if _serper_client is None or _serper_client.is_closed:
+        _serper_client = httpx.AsyncClient(
+            base_url=SERPER_API_URL,
+            headers={"X-API-KEY": settings.serper_api_key or ""},
+            timeout=15,
+        )
+    return _serper_client
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    """Get or create shared HTTP client for page fetching."""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            follow_redirects=True,
+            headers=_BROWSER_HEADERS,
+            timeout=30,
+        )
+    return _http_client
+
+
+async def close_clients() -> None:
+    """Close shared HTTP clients (call on app shutdown)."""
+    global _serper_client, _http_client
+    if _serper_client and not _serper_client.is_closed:
+        await _serper_client.aclose()
+        _serper_client = None
+    if _http_client and not _http_client.is_closed:
+        await _http_client.aclose()
+        _http_client = None
+
 
 # ===================================================================
 # Serper.dev Web Search (used by fallback scraping path)
@@ -31,21 +80,19 @@ async def search_web(*, query: str, num_results: int = 5) -> list[str]:
     if not settings.serper_api_key:
         raise ValueError("SERPER_API_KEY not configured")
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{SERPER_API_URL}/search",
-                json={"q": query, "num": num_results},
-                headers={"X-API-KEY": settings.serper_api_key},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            urls = []
-            for result in data.get("organic", []):
-                url = result.get("link", "")
-                if url and url not in urls:
-                    urls.append(url)
-            return urls
+        client = _get_serper_client()
+        resp = await client.post(
+            "/search",
+            json={"q": query, "num": num_results},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        urls = []
+        for result in data.get("organic", []):
+            url = result.get("link", "")
+            if url and url not in urls:
+                urls.append(url)
+        return urls
     except ValueError:
         raise
     except Exception:
@@ -85,19 +132,10 @@ async def fetch_page_content(*, url: str) -> str:
 
 async def _fetch_html(*, url: str) -> str:
     """Fetch raw HTML from a URL."""
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        resp = await client.get(url, timeout=30, headers=headers)
-        resp.raise_for_status()
-        return resp.text
+    client = _get_http_client()
+    resp = await client.get(url)
+    resp.raise_for_status()
+    return resp.text
 
 
 async def _fetch_page_raw(*, url: str) -> str:
@@ -177,15 +215,13 @@ async def _serper_search_with_snippets(
     if not settings.serper_api_key:
         return []
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{SERPER_API_URL}/search",
-                json={"q": query, "num": num_results},
-                headers={"X-API-KEY": settings.serper_api_key},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            return resp.json().get("organic", [])
+        client = _get_serper_client()
+        resp = await client.post(
+            "/search",
+            json={"q": query, "num": num_results},
+        )
+        resp.raise_for_status()
+        return resp.json().get("organic", [])
     except Exception:
         return []
 

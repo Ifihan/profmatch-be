@@ -13,6 +13,8 @@ from app.routes import auth, credits, match, professor, session, upload
 from app.services.cleanup import start_cleanup_task, stop_cleanup_task
 from app.services.database import close_db, init_db
 from app.services.openalex import close_client as close_openalex
+from app.services.tools import close_clients as close_tools
+from app.utils.storage import init_gcs
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,11 +24,13 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info(json.dumps({"event": "app_startup", "env": settings.env}))
     await init_db()
+    await init_gcs()
     await start_cleanup_task()
 
     yield
 
     await stop_cleanup_task()
+    await close_tools()
     await close_openalex()
     await close_db()
 

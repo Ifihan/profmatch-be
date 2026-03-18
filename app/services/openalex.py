@@ -284,20 +284,20 @@ async def get_works_for_authors(
     """Fetch recent works for multiple authors in batched API calls.
 
     Returns dict mapping author OpenAlex ID -> list of work dicts.
-    Batches author IDs into groups of 10 to stay within URL length limits.
+    Batches author IDs into groups of 25 and fetches all batches in parallel.
     """
     if not author_ids:
         return {}
 
+    import asyncio
+
     client = _get_client()
     cutoff_year = datetime.now().year - years
-    batch_size = 10
+    batch_size = 25
     result: dict[str, list[dict]] = defaultdict(list)
 
-    for i in range(0, len(author_ids), batch_size):
-        batch = author_ids[i : i + batch_size]
+    async def _fetch_batch(batch: list[str]) -> tuple[list[str], list[dict]]:
         author_filter = "|".join(batch)
-
         resp = await client.get(
             "/works",
             params={
@@ -314,14 +314,25 @@ async def get_works_for_authors(
             },
         )
         resp.raise_for_status()
-        works = resp.json().get("results", [])
+        return batch, resp.json().get("results", [])
 
-        # Group works by author ID
+    batches = [author_ids[i : i + batch_size] for i in range(0, len(author_ids), batch_size)]
+    batch_results = await asyncio.gather(
+        *[_fetch_batch(b) for b in batches],
+        return_exceptions=True,
+    )
+
+    for br in batch_results:
+        if isinstance(br, Exception):
+            logger.warning("batch works fetch failed: %s", br)
+            continue
+        batch, works = br
+        batch_set = set(batch)
         for w in works:
             parsed = _parse_work(w)
             for authorship in w.get("authorships") or []:
                 aid = (authorship.get("author") or {}).get("id", "")
-                if aid in batch:
+                if aid in batch_set:
                     result[aid].append(parsed)
                     break
 

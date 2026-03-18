@@ -39,6 +39,22 @@ async def get_session(*, session_id: str) -> dict[str, Any] | None:
         return dict(row.data) if row else None
 
 
+async def update_session_fields(*, session_id: str, updates: dict[str, Any]) -> None:
+    """Update specific fields in session data with a single DB round trip."""
+    async with async_session() as db:
+        stmt = select(Session).where(
+            Session.id == session_id,
+            Session.expires_at > datetime.now(UTC),
+        )
+        result = await db.execute(stmt)
+        existing = result.scalar_one_or_none()
+        if existing:
+            data = dict(existing.data)
+            data.update(updates)
+            existing.data = data
+            await db.commit()
+
+
 async def delete_session(*, session_id: str) -> bool:
     """Delete session data. Returns True if a row was deleted."""
     async with async_session() as db:
