@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select, tuple_
 
 from app.models import CitationMetrics, ProfessorProfile, Publication
 from app.models.database import FacultyCache, ProfessorCache
@@ -39,6 +39,55 @@ async def get_cached_professor_by_openalex_id(*, openalex_id: str) -> ProfessorP
             return cache_to_profile(cached)
         return None
 
+
+
+async def get_cached_professors_batch(
+    *,
+    lookups: list[tuple[str | None, str, str]],
+) -> dict[str, ProfessorProfile]:
+    """Batch-fetch cached professors in a single DB query.
+
+    Args:
+        lookups: list of (openalex_id, name, university) tuples.
+
+    Returns:
+        dict keyed by openalex_id or "name|university" -> ProfessorProfile.
+    """
+    if not lookups:
+        return {}
+
+    cutoff = datetime.now(UTC) - timedelta(days=CACHE_TTL_DAYS)
+
+    openalex_ids = [oa_id for oa_id, _, _ in lookups if oa_id]
+    name_uni_pairs = [(name, uni) for _, name, uni in lookups if name]
+
+    conditions = []
+    if openalex_ids:
+        conditions.append(ProfessorCache.openalex_id.in_(openalex_ids))
+    if name_uni_pairs:
+        conditions.append(
+            tuple_(ProfessorCache.name, ProfessorCache.university).in_(name_uni_pairs)
+        )
+
+    if not conditions:
+        return {}
+
+    async with async_session() as session:
+        stmt = select(ProfessorCache).where(
+            or_(*conditions),
+            ProfessorCache.updated_at > cutoff,
+        )
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+
+    found: dict[str, ProfessorProfile] = {}
+    for row in rows:
+        profile = cache_to_profile(row)
+        if row.openalex_id:
+            found[row.openalex_id] = profile
+        found[f"{row.name}|{row.university}"] = profile
+
+    return found
 
 
 async def cache_professor(*, profile: ProfessorProfile) -> None:

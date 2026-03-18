@@ -13,8 +13,9 @@ from app.config import settings
 UPLOAD_DIR = Path("uploads")
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
 
-# Initialize GCS client
+# Initialize GCS client and bucket (pre-warmed at startup)
 _gcs_client = None
+_gcs_bucket = None
 
 
 def get_gcs_client() -> storage.Client:
@@ -26,9 +27,21 @@ def get_gcs_client() -> storage.Client:
 
 
 def get_gcs_bucket() -> storage.Bucket:
-    """Get GCS bucket."""
-    client = get_gcs_client()
-    return client.bucket(settings.gcs_bucket_name)
+    """Get cached GCS bucket."""
+    global _gcs_bucket
+    if _gcs_bucket is None:
+        client = get_gcs_client()
+        _gcs_bucket = client.bucket(settings.gcs_bucket_name)
+    return _gcs_bucket
+
+
+async def init_gcs() -> None:
+    """Pre-warm GCS client and bucket at startup.
+
+    Credential loading can take 5-15s on Cloud Run (metadata server).
+    Running this at startup avoids penalizing the first request.
+    """
+    await asyncio.to_thread(get_gcs_bucket)
 
 
 def ensure_upload_dir() -> None:
@@ -41,9 +54,10 @@ def validate_extension(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
 
 
-async def save_file(session_id: str, filename: str, content: bytes) -> str:
+async def save_file(session_id: str, filename: str, content: bytes, file_id: str | None = None) -> str:
     """Save uploaded file to GCS and return file_id."""
-    file_id = str(uuid4())
+    if file_id is None:
+        file_id = str(uuid4())
     ext = Path(filename).suffix.lower()
 
     # Create blob path: session_id/file_id.ext

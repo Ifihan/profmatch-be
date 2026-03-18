@@ -22,21 +22,21 @@ from app.services.cache import (
     get_cached_faculty,
     get_cached_professor,
     get_cached_professor_by_openalex_id,
+    get_cached_professors_batch,
 )
 from app.services import gemini, openalex, tools
-from app.services.session_store import get_session, set_session
+from app.services.session_store import get_session, set_session, update_session_fields
 from app.utils.storage import get_file_path
 
 logger = logging.getLogger(__name__)
 
 
 async def update_progress(*, session_id: str, progress: int, step: str) -> None:
-    """Update matching progress in session."""
-    session = await get_session(session_id=session_id)
-    if session:
-        session["match_progress"] = progress
-        session["current_step"] = step
-        await set_session(session_id=session_id, data=session)
+    """Update matching progress in session (single DB round trip)."""
+    await update_session_fields(
+        session_id=session_id,
+        updates={"match_progress": progress, "current_step": step},
+    )
 
 
 async def run_matching(
@@ -206,7 +206,15 @@ async def parse_student_documents(
     skills = []
     extracted_keywords = list(research_interests)
 
+    # Check session for pre-parsed CVs (parsed during upload)
+    session_data = await get_session(session_id=session_id) or {}
+    pre_parsed = session_data.get("parsed_cvs", {})
+
     async def parse_single_file(file_id: str) -> dict | None:
+        # Use pre-parsed data if available (parsed during upload background task)
+        if file_id in pre_parsed:
+            return pre_parsed[file_id]
+        # Fallback: download from GCS and parse
         file_path = await get_file_path(session_id, file_id)
         if not file_path:
             return None
@@ -603,12 +611,12 @@ def filter_faculty_by_relevance(
     Uses OpenAlex topic hierarchy when available (domain > field > subfield > topic).
     Falls back to keyword matching on name/title/department for scraped faculty.
     Excludes visiting/adjunct/emeritus/honorary faculty.
-    Returns top 30 by score.
+    Returns top 20 by score.
     """
     # Remove ineligible faculty first
     faculty_data = [f for f in faculty_data if _is_eligible_faculty(f.get("title"))]
 
-    if len(faculty_data) <= 30:
+    if len(faculty_data) <= 20:
         return faculty_data
 
     interest_tokens = set()
@@ -631,7 +639,7 @@ def filter_faculty_by_relevance(
         scored.append((f, score))
 
     scored.sort(key=lambda x: x[1], reverse=True)
-    return [f for f, _ in scored[:30]]
+    return [f for f, _ in scored[:20]]
 
 
 def _compute_topic_score(
@@ -915,9 +923,32 @@ async def enrich_professors(
     Uses batched OpenAlex works API for professors with openalex_ids.
     Returns (professors, errors).
     """
-    # Batch-fetch works for all OpenAlex professors at once
+    # Batch cache lookup: single DB query instead of 2 per professor
+    lookups = [
+        (f.get("openalex_id"), f.get("name", ""), university)
+        for f in faculty_data
+    ]
+    cached_map = await get_cached_professors_batch(lookups=lookups)
+
+    # Separate cached hits from misses
+    professors: list[ProfessorProfile] = []
+    uncached_faculty: list[dict[str, Any]] = []
+    for f in faculty_data:
+        oa_id = f.get("openalex_id")
+        name = f.get("name", "")
+        cached = None
+        if oa_id:
+            cached = cached_map.get(oa_id)
+        if not cached:
+            cached = cached_map.get(f"{name}|{university}")
+        if cached:
+            professors.append(cached)
+        else:
+            uncached_faculty.append(f)
+
+    # Batch-fetch works for all uncached OpenAlex professors at once
     openalex_ids = [
-        f["openalex_id"] for f in faculty_data
+        f["openalex_id"] for f in uncached_faculty
         if f.get("openalex_id")
     ]
     all_works: dict[str, list[dict]] = {}
@@ -940,12 +971,11 @@ async def enrich_professors(
                 all_works=all_works,
             )
 
-    tasks = [enrich_with_limit(f) for f in faculty_data]
+    tasks = [enrich_with_limit(f) for f in uncached_faculty]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    professors = []
     errors = []
-    for faculty, result in zip(faculty_data, results):
+    for faculty, result in zip(uncached_faculty, results):
         if isinstance(result, ProfessorProfile):
             professors.append(result)
         elif isinstance(result, Exception):
@@ -1085,9 +1115,8 @@ async def generate_matches(
             "id": str(p.id),
             "name": p.name,
             "title": p.title,
-            "department": p.department,
             "research_areas": p.research_areas[:5],
-            "recent_papers": [pub.title for pub in p.publications[:5]],
+            "recent_papers": [pub.title for pub in p.publications[:3]],
             "h_index": p.citation_metrics.h_index if p.citation_metrics else 0,
         })
 

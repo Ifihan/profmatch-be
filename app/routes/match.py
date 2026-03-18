@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from app.models import MatchRequest, MatchResult, MatchResultsResponse, MatchStatusResponse
 from app.models.database import SearchHistory, Session
-from app.services.auth import decode_access_token
+from app.services.auth import decode_access_token, link_session_to_user
 from app.services.credits import (
     check_anonymous_limit,
     deduct_credit,
@@ -92,6 +92,9 @@ async def start_match(
     match_id = str(uuid4())
 
     if user_id:
+        # Ensure session is linked to the authenticated user for search history
+        await link_session_to_user(session_id=match_request.session_id, user_id=user_id)
+
         # Authenticated user — check and deduct credits
         success = await deduct_credit(
             user_id=user_id,

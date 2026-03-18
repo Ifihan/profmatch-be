@@ -269,8 +269,8 @@ class TestFilterFacultyByRelevance:
         )
         assert len(result) == 20
 
-    def test_large_list_filtered_to_30(self):
-        """Lists > 30 filtered to top 30."""
+    def test_large_list_filtered_to_20(self):
+        """Lists > 20 filtered to top 20."""
         faculty = [
             {"name": f"Prof {i}", "topics": [f"Topic {i}"]}
             for i in range(50)
@@ -280,7 +280,7 @@ class TestFilterFacultyByRelevance:
         result = filter_faculty_by_relevance(
             faculty_data=faculty, research_interests=["machine learning"]
         )
-        assert len(result) == 30
+        assert len(result) == 20
         # the matching professor should be first
         assert result[0]["topics"] == ["Machine Learning"]
 

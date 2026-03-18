@@ -23,7 +23,7 @@ from app.models.agent_models import (
 
 T = TypeVar("T", bound=BaseModel)
 
-MODEL = "gemini-3-flash-preview"
+MODEL = "gemini-2.5-flash-lite"
 
 _client: genai.Client | None = None
 
@@ -112,9 +112,7 @@ async def extract_professor_details(
     )
 
 
-async def find_faculty_directory_url(
-    page_content: str, base_url: str
-) -> str | None:
+async def find_faculty_directory_url(page_content: str, base_url: str) -> str | None:
     """Find faculty directory URL from page content.
 
     Returns the URL string or None if not found.
@@ -145,9 +143,7 @@ async def find_faculty_directory_url(
 # ===================================================================
 
 
-async def filter_faculty(
-    faculty_summaries: str, interests: str
-) -> FilterOutput:
+async def filter_faculty(faculty_summaries: str, interests: str) -> FilterOutput:
     """Filter faculty list by research relevance."""
     prompt = (
         f"Select the 30 professors most likely to research: {interests}\n\n"
@@ -189,6 +185,8 @@ async def generate_match_rankings(
             "them by research alignment with student interests. For each match, "
             "provide a score (0-100), specific alignment reasons, relevant "
             "publication titles the student could cite, shared keywords, and a "
-            "recommendation. Return the top 10 matches maximum."
+            "recommendation. You MUST return exactly 10 matches, ranked by "
+            "alignment score. Even if alignment is weak, still include the "
+            "professor with a lower score and explain the limited overlap."
         ),
     )
