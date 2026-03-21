@@ -43,6 +43,7 @@ def _user_response(user) -> UserResponse:
         id=user.id,
         email=user.email,
         name=user.name,
+        is_admin=user.is_admin,
         created_at=user.created_at,
     )
 
