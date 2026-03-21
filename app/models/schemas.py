@@ -173,6 +173,7 @@ class UserResponse(BaseModel):
     id: str
     email: str
     name: str
+    is_admin: bool = False
     created_at: datetime
 
 
@@ -235,3 +236,52 @@ class PlansResponse(BaseModel):
     """Available credit plans."""
     plans: list[PlanInfo]
     message: str = "Credit purchases coming soon!"
+
+
+# --- Admin / Promo code schemas ---
+
+class CreatePromoCodeRequest(BaseModel):
+    """Request to create a promo code."""
+    code: str = Field(min_length=3, max_length=50)
+    credits: int = Field(gt=0)
+    max_uses: int = Field(gt=0)
+
+
+class PromoCodeResponse(BaseModel):
+    """Promo code details."""
+    id: str
+    code: str
+    credits: int
+    max_uses: int
+    use_count: int
+    is_active: bool
+    created_at: datetime
+
+
+class PromoCodeListResponse(BaseModel):
+    """List of promo codes."""
+    promo_codes: list[PromoCodeResponse]
+
+
+class TogglePromoCodeRequest(BaseModel):
+    """Request to enable/disable a promo code."""
+    is_active: bool
+
+
+class RedeemPromoCodeRequest(BaseModel):
+    """Request to redeem a promo code."""
+    code: str
+
+
+class RedeemPromoCodeResponse(BaseModel):
+    """Result of redeeming a promo code."""
+    credits_granted: int
+    new_balance: int
+
+
+class AdminStatsResponse(BaseModel):
+    """Platform statistics for admin dashboard."""
+    total_users: int
+    total_searches: int
+    active_users_last_30d: int
+    paid_users: int

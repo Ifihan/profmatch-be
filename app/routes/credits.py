@@ -1,13 +1,21 @@
-"""Search credits routes: balance, usage history, plans."""
+"""Search credits routes: balance, usage history, plans, promo code redemption."""
 
 from app.dependencies import CurrentUser
-from app.models.schemas import CreditsResponse, PlanInfo, PlansResponse, SearchUsageItem
+from app.models.schemas import (
+    CreditsResponse,
+    PlanInfo,
+    PlansResponse,
+    RedeemPromoCodeRequest,
+    RedeemPromoCodeResponse,
+    SearchUsageItem,
+)
 from app.services.credits import (
     calculate_available_credits,
     get_or_create_credits,
     get_usage_history,
     next_free_credit_at,
 )
+from app.services import promo
 
 from fastapi import APIRouter
 
@@ -44,3 +52,14 @@ async def get_credits(user: CurrentUser):
 async def get_plans():
     """Get available credit purchase plans."""
     return PlansResponse(plans=PLANS)
+
+
+@router.post("/redeem", response_model=RedeemPromoCodeResponse)
+async def redeem_code(body: RedeemPromoCodeRequest, user: CurrentUser):
+    """Redeem a promo code to receive credits."""
+    credits_granted, new_balance = await promo.redeem_promo_code(
+        code=body.code, user_id=user.id
+    )
+    return RedeemPromoCodeResponse(
+        credits_granted=credits_granted, new_balance=new_balance
+    )
