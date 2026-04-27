@@ -6,7 +6,10 @@ constrained decoding that guarantees valid output.
 """
 
 import json
+import logging
 from typing import TypeVar
+
+logger = logging.getLogger(__name__)
 
 from google import genai
 from google.genai import types
@@ -19,6 +22,7 @@ from app.models.agent_models import (
     ParsedCV,
     ProfessorPageOutput,
     FacultyMember,
+    ResearchInterestProfileOutput,
 )
 
 T = TypeVar("T", bound=BaseModel)
@@ -50,11 +54,29 @@ async def _generate_structured(
     if system_instruction:
         config.system_instruction = system_instruction
 
-    response = await client.aio.models.generate_content(
-        model=MODEL,
-        contents=prompt,
-        config=config,
-    )
+    try:
+        response = await client.aio.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+            config=config,
+        )
+    except Exception as e:
+        logger.error(
+            f"Gemini API call failed for schema {schema.__name__}: "
+            f"{type(e).__name__}: {str(e)}"
+        )
+        raise
+
+    # `response.parsed` may validly be an empty list for schemas like list[FacultyMember].
+    if response.parsed is None:
+        logger.error(
+            f"Gemini returned no parsed output for schema {schema.__name__}. "
+            f"Raw text preview: {(response.text or '')[:300]}"
+        )
+        raise ValueError(
+            f"Gemini failed to return structured output for schema {schema.__name__}"
+        )
+
     return response.parsed
 
 
@@ -162,6 +184,31 @@ async def filter_faculty(faculty_summaries: str, interests: str) -> FilterOutput
 
 
 # ===================================================================
+# Research Interest Parsing
+# ===================================================================
+
+
+async def parse_research_interest_profile(
+    interests_text: str,
+) -> ResearchInterestProfileOutput:
+    """Parse free-form research interests into a compact search profile."""
+    return await _generate_structured(
+        prompt=f"Research interests:\n{interests_text[:4000]}",
+        schema=ResearchInterestProfileOutput,
+        system_instruction=(
+            "You normalize student research interests for faculty discovery. "
+            "Extract 2-4 concise primary themes, 4-10 related keywords, 1-3 "
+            "likely academic units or departments, and one broad route hint. "
+            "Prefer short noun phrases. Remove filler language and do not copy "
+            "whole sentences. Route hints should be one of: computing, "
+            "engineering, life_sciences_health, physical_sciences_math, "
+            "business_economics, social_sciences, humanities, "
+            "law_policy_education, or generic."
+        ),
+    )
+
+
+# ===================================================================
 # Match Generation
 # ===================================================================
 
@@ -181,12 +228,17 @@ async def generate_match_rankings(
         prompt=prompt,
         schema=MatchOutput,
         system_instruction=(
-            "You are a research matching expert. Analyze professors and rank "
-            "them by research alignment with student interests. For each match, "
-            "provide a score (0-100), specific alignment reasons, relevant "
-            "publication titles the student could cite, shared keywords, and a "
-            "recommendation. You MUST return exactly 10 matches, ranked by "
-            "alignment score. Even if alignment is weak, still include the "
-            "professor with a lower score and explain the limited overlap."
+            "You are a research matching expert. Rank professors primarily by "
+            "alignment with the student's stated research interests. Treat the "
+            "student background as secondary context only; do not let resume "
+            "details outweigh the stated interests. Prefer candidates whose "
+            "department and role fit the target field, penalize mismatched "
+            "departments, and do not invent titles or certainty when metadata is "
+            "missing. For each match, provide a score (0-100), specific "
+            "alignment reasons, relevant publication titles the student could "
+            "cite, shared keywords, and a recommendation. You MUST return "
+            "exactly 10 matches, ranked by alignment score. Even if alignment is "
+            "weak, still include the professor with a lower score and explain "
+            "the limited overlap."
         ),
     )

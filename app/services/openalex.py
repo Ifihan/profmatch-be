@@ -178,16 +178,17 @@ async def get_authors_by_institution(
     client = _get_client()
 
     filter_parts = [f"last_known_institutions.id:{institution_id}"]
-
+    search_query = None
     if topics:
-        # search for authors whose topics match any of the provided keywords
-        topic_query = "|".join(topics[:5])
-        filter_parts.append(f"topics.display_name.search:{topic_query}")
+        cleaned_topics = [topic.strip() for topic in topics if topic and topic.strip()]
+        if cleaned_topics:
+            search_query = " ".join(cleaned_topics[:3])
 
     resp = await client.get(
         "/authors",
         params={
             "filter": ",".join(filter_parts),
+            **({"search": search_query} if search_query else {}),
             "sort": "cited_by_count:desc",
             "per_page": min(limit, 200),
             "select": (

@@ -2,12 +2,20 @@
 
 import pytest
 
+from app.models.agent_models import ResearchInterestProfileOutput
 from app.services.orchestrator import (
+    build_research_interest_profile,
     to_str,
     to_list,
     to_int,
+    _directory_search_terms,
     _extract_domain,
+    _infer_matching_route,
+    _infer_target_academic_units,
+    _merge_faculty_sources,
+    _normalize_title,
     filter_faculty_by_relevance,
+    shortlist_faculty_for_enrichment,
     _compute_topic_score,
 )
 
@@ -205,6 +213,49 @@ class TestComputeTopicScore:
         )
         assert score > 0
 
+    def test_department_alignment_boosts_target_unit(self):
+        """Matching department gets a boost for the inferred academic unit."""
+        faculty = {
+            "topics": ["Software Engineering", "Program Analysis"],
+            "department": "Department of Computing Science",
+            "directory_verified": True,
+        }
+        score = _compute_topic_score(
+            faculty=faculty,
+            interest_tokens={"software", "engineering"},
+            interest_phrases=["software engineering"],
+            target_units=["computer science", "software engineering"],
+        )
+        assert score >= 7.0
+
+    def test_department_mismatch_is_penalized(self):
+        """Unrelated departments should rank below clearly aligned departments."""
+        score = _compute_topic_score(
+            faculty={
+                "topics": ["Software Engineering"],
+                "department": "Electrical and Computer Engineering",
+            },
+            interest_tokens={"software", "engineering"},
+            interest_phrases=["software engineering"],
+            target_units=["computer science", "software engineering"],
+        )
+        assert score < 3.0
+
+    def test_non_stem_department_alignment_boosts_history(self):
+        """Humanities departments should benefit from route-specific scoring."""
+        score = _compute_topic_score(
+            faculty={
+                "topics": ["Modern History", "Historiography"],
+                "department": "Department of History",
+                "directory_verified": True,
+            },
+            interest_tokens={"history", "historiography"},
+            interest_phrases=["modern history", "historiography"],
+            target_units=["history"],
+            route_name="humanities",
+        )
+        assert score >= 7.0
+
     def test_no_match_returns_zero(self):
         """Unrelated topics score zero."""
         faculty = {
@@ -258,6 +309,158 @@ class TestComputeTopicScore:
         assert score == 0.0
 
 
+class TestTargetAcademicUnits:
+    """Tests for academic-unit inference from research interests."""
+
+    def test_software_interests_prioritize_computing_units(self):
+        units = _infer_target_academic_units([
+            "software engineering",
+            "software systems",
+        ])
+        assert "computer science" in units
+        assert "software engineering" in units
+
+    def test_history_interests_prioritize_humanities_units(self):
+        units = _infer_target_academic_units([
+            "modern history",
+            "historiography",
+        ])
+        assert "history" in units
+
+    def test_finance_interests_prioritize_business_units(self):
+        units = _infer_target_academic_units([
+            "corporate finance",
+            "financial economics",
+        ])
+        assert "finance" in units
+
+
+class TestRouteInference:
+    """Tests for broad-discipline routing."""
+
+    def test_computing_route_detected(self):
+        route = _infer_matching_route(["software engineering", "distributed systems"])
+        assert route == "computing"
+
+    def test_humanities_route_detected(self):
+        route = _infer_matching_route(["history", "literary studies"])
+        assert route == "humanities"
+
+    def test_business_route_detected(self):
+        route = _infer_matching_route(["finance", "econometrics"])
+        assert route == "business_economics"
+
+    def test_ambiguous_route_falls_back_to_generic(self):
+        route = _infer_matching_route(["interdisciplinary research"])
+        assert route == "generic"
+
+
+class TestResearchInterestProfile:
+    """Tests for structured research-interest normalization."""
+
+    @pytest.mark.asyncio
+    async def test_deterministic_profile_splits_long_interest(self):
+        profile = await build_research_interest_profile([
+            "I am interested in software engineering and distributed computing for scalable systems",
+        ])
+        assert profile.route_name == "computing"
+        assert any("software" in phrase for phrase in profile.normalized_phrases)
+        assert any("distributed" in phrase for phrase in profile.normalized_phrases)
+        assert any(
+            keyword in {"scalable", "software engineering", "distributed computing", "systems"}
+            for keyword in profile.keywords
+        )
+
+    @pytest.mark.asyncio
+    async def test_gemini_profile_is_merged_when_available(self, monkeypatch):
+        async def fake_parse_research_interest_profile(interests_text: str):
+            return ResearchInterestProfileOutput(
+                primary_themes=["distributed systems", "software reliability"],
+                related_keywords=["fault tolerance", "cloud systems"],
+                target_units=["computer science"],
+                route_hint="computing",
+            )
+
+        monkeypatch.setattr(
+            "app.services.gemini.parse_research_interest_profile",
+            fake_parse_research_interest_profile,
+        )
+
+        profile = await build_research_interest_profile([
+            "I am interested in scalable software systems, cloud-native architectures, and reliability in distributed applications.",
+        ])
+        assert profile.route_name == "computing"
+        assert "distributed systems" in profile.normalized_phrases
+        assert "fault tolerance" in profile.keywords
+        assert "computer science" in profile.target_units
+
+
+class TestDirectorySearchTerms:
+    """Tests for route-guided search-term generation."""
+
+    def test_non_stem_search_terms_include_route_terms(self):
+        terms = _directory_search_terms(
+            research_interests=["modern history", "historiography"],
+            route_name="humanities",
+        )
+        assert "humanities" in terms
+        assert "history" in terms
+
+
+class TestTitleNormalization:
+    """Tests for title cleanup and normalization."""
+
+    def test_normalize_associate_professor(self):
+        assert _normalize_title("Associate professor of Computer Science") == "Associate Professor"
+
+    def test_unknown_title_is_capitalized(self):
+        assert _normalize_title("department chair") == "Department Chair"
+
+
+class TestMergeFacultySources:
+    """Tests for hybrid OpenAlex and directory metadata merging."""
+
+    def test_scraped_metadata_enriches_openalex_author(self):
+        merged = _merge_faculty_sources(
+            openalex_faculty=[
+                {
+                    "name": "Dr. Alice Smith",
+                    "openalex_id": "A1",
+                    "topics": ["Software Engineering"],
+                    "topic_details": [],
+                },
+            ],
+            scraped_faculty=[
+                {
+                    "name": "Alice Smith",
+                    "title": "Associate Professor",
+                    "department": "Computing Science",
+                    "email": "alice@example.edu",
+                    "profile_url": "https://example.edu/alice",
+                },
+            ],
+        )
+        assert len(merged) == 1
+        assert merged[0]["title"] == "Associate Professor"
+        assert merged[0]["department"] == "Computing Science"
+        assert merged[0]["directory_verified"] is True
+
+    def test_unmatched_scraped_faculty_is_retained(self):
+        merged = _merge_faculty_sources(
+            openalex_faculty=[],
+            scraped_faculty=[
+                {
+                    "name": "Prof. Carol Jones",
+                    "title": "Senior Lecturer",
+                    "department": "Computer Science",
+                },
+            ],
+        )
+        assert len(merged) == 1
+        assert merged[0]["name"] == "Prof. Carol Jones"
+        assert merged[0]["title"] == "Senior Lecturer"
+
+
 class TestFilterFacultyByRelevance:
     """Tests for filter_faculty_by_relevance."""
 
@@ -269,8 +472,29 @@ class TestFilterFacultyByRelevance:
         )
         assert len(result) == 20
 
+
+class TestShortlistFacultyForEnrichment:
+    """Tests for keeping enrichment work on a smaller shortlist."""
+
+    def test_large_list_is_trimmed_to_requested_limit(self):
+        faculty = [
+            {
+                "name": f"Prof {i}",
+                "topics": ["Machine Learning"] if i < 3 else [f"Topic {i}"],
+                "cited_by_count": 1000 - i,
+            }
+            for i in range(20)
+        ]
+        result = shortlist_faculty_for_enrichment(
+            faculty_data=faculty,
+            research_interests=["machine learning"],
+            limit=12,
+        )
+        assert len(result) == 12
+        assert result[0]["topics"] == ["Machine Learning"]
+
     def test_large_list_filtered_to_20(self):
-        """Lists > 20 filtered to top 20."""
+        """When relevant matches exist, zero-score candidates are dropped."""
         faculty = [
             {"name": f"Prof {i}", "topics": [f"Topic {i}"]}
             for i in range(50)
@@ -280,7 +504,7 @@ class TestFilterFacultyByRelevance:
         result = filter_faculty_by_relevance(
             faculty_data=faculty, research_interests=["machine learning"]
         )
-        assert len(result) == 20
+        assert len(result) == 1
         # the matching professor should be first
         assert result[0]["topics"] == ["Machine Learning"]
 

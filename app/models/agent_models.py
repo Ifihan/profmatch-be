@@ -73,6 +73,15 @@ class ResearchAreasOutput(BaseModel):
     areas: list[str] = Field(default_factory=list)
 
 
+class ResearchInterestProfileOutput(BaseModel):
+    """Structured normalization of a student's research interests."""
+
+    primary_themes: list[str] = Field(default_factory=list)
+    related_keywords: list[str] = Field(default_factory=list)
+    target_units: list[str] = Field(default_factory=list)
+    route_hint: str | None = None
+
+
 class MatchEntry(BaseModel):
     """A single professor match."""
 
