@@ -48,6 +48,10 @@ async def require_admin(user: User = Depends(get_current_user)) -> User:
 
 
 def get_or_set_anon_id(request: Request) -> str:
-    """Read the anon session id from the cookie, or mint a new one.
-    The route sets the cookie on the response when new."""
-    return request.cookies.get(ANON_COOKIE) or str(uuid.uuid4())
+    """Return the anon session id from the cookie, or mint one. Normalised through
+    uuid.UUID so an arbitrary client-supplied value is never trusted or reflected."""
+    raw = request.cookies.get(ANON_COOKIE)
+    try:
+        return str(uuid.UUID(raw)) if raw else str(uuid.uuid4())
+    except ValueError:
+        return str(uuid.uuid4())

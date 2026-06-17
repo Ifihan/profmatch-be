@@ -5,8 +5,8 @@ class SignupRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={"example": {
         "name": "Ada Lovelace",
         "email": "ada@example.com",
-        "password": "s3curep@ssw0rd",
-        "confirm_password": "s3curep@ssw0rd",
+        "password": "ChangeMe_example123",
+        "confirm_password": "ChangeMe_example123",
     }})
 
     name: str = Field(min_length=1, max_length=120)
@@ -25,7 +25,7 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={"example": {
         "email": "ada@example.com",
-        "password": "s3curep@ssw0rd",
+        "password": "ChangeMe_example123",
     }})
 
     email: EmailStr
@@ -41,7 +41,7 @@ class ForgotPasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={"example": {
         "token": "<paste the reset token>",
-        "new_password": "n3wp@ssw0rd",
+        "new_password": "ChangeMe_example456",
     }})
 
     token: str

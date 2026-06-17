@@ -34,9 +34,11 @@ jobs:
 
       - name: Build & push image
         run: |
-          IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${{ vars.GCP_AR_REPO }}/profmatch:pr-${{ github.event.number }}-${GITHUB_SHA::8}"
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/profmatch/api:pr-${{ github.event.number }}-${GITHUB_SHA::8}"
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
-          gcloud builds submit --tag "$IMAGE" --quiet
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
 
       - name: Deploy to Cloud Run
         id: deploy
