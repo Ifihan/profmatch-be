@@ -1,193 +1,72 @@
-"""Pytest configuration and shared fixtures."""
+"""Shared test fixtures.
 
-import asyncio
-from collections.abc import AsyncGenerator, Generator
-from datetime import UTC, datetime
-from typing import Any
-from unittest.mock import patch
-from uuid import uuid4
+Unit tests (respx-mocked, no DB) run anywhere. DB-backed integration tests depend
+on the `track` fixture, which skips the test when the configured Postgres is
+unreachable, and cleans up any rows it created afterwards.
+"""
+import uuid
 
-import pytest
+import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 
-# Configure pytest-asyncio
-pytest_plugins = ["pytest_asyncio"]
-
-
-@pytest.fixture(scope="session")
-def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
-    """Create an event loop for the test session."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
+from app.core.db import SessionLocal, engine
+from app.core.security import hash_password
+from app.main import app
+from app.models import CreditEventType, User
+from app.services import credits
 
 
-@pytest.fixture
-def sample_publication_data() -> list[dict[str, Any]]:
-    """Sample publication data for testing."""
-    return [
-        {
-            "title": "Deep Learning for Natural Language Processing",
-            "authors": ["John Doe", "Jane Smith"],
-            "year": 2023,
-            "venue": "NeurIPS",
-            "abstract": "A paper about NLP",
-            "citation_count": 150,
-            "url": "https://example.com/paper1",
-        },
-        {
-            "title": "Reinforcement Learning in Robotics",
-            "authors": ["John Doe"],
-            "year": 2022,
-            "venue": "ICRA",
-            "abstract": "A paper about robotics",
-            "citation_count": 75,
-            "url": "https://example.com/paper2",
-        },
-    ]
+@pytest_asyncio.fixture
+async def client():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        yield c
+    # Release pool connections on this test's loop to avoid cross-loop cleanup noise.
+    await engine.dispose()
 
 
-@pytest.fixture
-def sample_professor_data() -> dict[str, Any]:
-    """Sample professor data for testing."""
-    return {
-        "id": str(uuid4()),
-        "name": "Dr. John Doe",
-        "title": "Associate Professor",
-        "department": "Computer Science",
-        "university": "MIT",
-        "email": "john.doe@mit.edu",
-        "research_areas": ["machine learning", "NLP", "robotics"],
-        "publications": [],
-        "citation_metrics": {"h_index": 25, "i10_index": 40, "total_citations": 5000},
-        "last_updated": datetime.now(UTC).isoformat(),
-    }
+@pytest_asyncio.fixture
+async def track():
+    """Register created user/promo ids for teardown; skip if DB is unreachable."""
+    import pytest
+    # pytest-asyncio gives each test its own event loop; rebind the shared engine's
+    # pool to the current loop so connections aren't reused across loops.
+    await engine.dispose()
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"database not reachable: {exc}")
+
+    reg: dict[str, list[str]] = {"users": [], "promos": []}
+    yield reg
+
+    async with engine.begin() as conn:
+        for uid in reg["users"]:
+            await conn.execute(text("delete from credit_events where user_id=:u"), {"u": uid})
+            await conn.execute(text("delete from promo_redemptions where user_id=:u"), {"u": uid})
+            await conn.execute(text("delete from match_jobs where user_id=:u"), {"u": uid})
+            await conn.execute(text("delete from users where id=:u"), {"u": uid})
+        for pid in reg["promos"]:
+            await conn.execute(text("delete from promo_redemptions where promo_id=:p"), {"p": pid})
+            await conn.execute(text("delete from promo_codes where id=:p"), {"p": pid})
 
 
-@pytest.fixture
-def sample_faculty_data() -> list[dict[str, Any]]:
-    """Sample faculty data from university directory."""
-    return [
-        {
-            "name": "Dr. Alice Smith",
-            "title": "Professor",
-            "department": "Computer Science",
-            "email": "alice@example.edu",
-            "profile_url": "https://example.edu/alice",
-        },
-        {
-            "name": "Dr. Bob Jones",
-            "title": "Assistant Professor",
-            "department": "Electrical Engineering",
-            "email": "bob@example.edu",
-            "profile_url": "https://example.edu/bob",
-        },
-        {
-            "name": "Dr. Carol Williams",
-            "title": "Associate Professor",
-            "department": "Computer Science",
-            "email": "carol@example.edu",
-            "profile_url": "https://example.edu/carol",
-        },
-    ]
-
-
-@pytest.fixture
-def sample_cv_data() -> dict[str, Any]:
-    """Sample parsed CV data."""
-    return {
-        "education": [
-            {
-                "institution": "Stanford University",
-                "degree": "PhD",
-                "field": "Computer Science",
-                "year": 2020,
-            },
-            {
-                "institution": "MIT",
-                "degree": "BS",
-                "field": "Mathematics",
-                "year": 2015,
-            },
-        ],
-        "experience": [
-            {
-                "organization": "Google",
-                "role": "Research Intern",
-                "description": "Worked on ML models",
-                "start_year": 2019,
-                "end_year": 2020,
-            },
-        ],
-        "publications": [
-            {
-                "title": "My Research Paper",
-                "authors": ["Me", "Advisor"],
-                "year": 2020,
-                "venue": "ICML",
-            },
-        ],
-        "skills": ["Python", "TensorFlow", "PyTorch"],
-        "research_interests": ["machine learning", "computer vision"],
-    }
-
-
-@pytest.fixture
-def mock_gcs_bucket():
-    """Mock GCS bucket for testing."""
-    blobs = {}
-
-    class MockBlob:
-        def __init__(self, name):
-            self.name = name
-            self.metadata = {}
-            self.time_created = datetime.now(UTC)
-
-        def upload_from_string(self, content):
-            blobs[self.name] = {"content": content, "metadata": self.metadata}
-
-        def download_to_filename(self, filename):
-            if self.name in blobs:
-                with open(filename, "wb") as f:
-                    f.write(blobs[self.name]["content"])
-
-        def exists(self):
-            return self.name in blobs
-
-    class MockBucket:
-        def blob(self, name):
-            return MockBlob(name)
-
-        def list_blobs(self, prefix=None):
-            result = []
-            for name in blobs:
-                if prefix is None or name.startswith(prefix):
-                    result.append(MockBlob(name))
-            return result
-
-        def delete_blobs(self, blob_list):
-            for blob in blob_list:
-                if blob.name in blobs:
-                    del blobs[blob.name]
-
-    return MockBucket(), blobs
-
-
-@pytest.fixture
-async def test_app() -> AsyncGenerator[AsyncClient, None]:
-    """Create test client for FastAPI app."""
-    # Import here to avoid loading app before mocks are in place
-    with patch.dict("os.environ", {
-        "DATABASE_URL": "sqlite+aiosqlite:///:memory:",
-        "GEMINI_API_KEY": "test-key",
-        "SERPER_API_KEY": "test-serper-key",
-        "GCS_BUCKET_NAME": "test-bucket",
-        "GCS_PROJECT_ID": "test-project",
-    }):
-        from app.main import app
-
-        async with AsyncClient(
-            transport=ASGITransport(app=app),
-            base_url="http://test",
-        ) as client:
-            yield client
+@pytest_asyncio.fixture
+def make_user(track):
+    async def _make(admin: bool = False, starting_credits: int = 1) -> str:
+        async with SessionLocal() as db:
+            u = User(
+                name="t",
+                email=f"test_{uuid.uuid4().hex[:10]}@example.com",
+                password_hash=hash_password("password123"),
+                is_admin=admin,
+            )
+            db.add(u)
+            await db.flush()
+            if starting_credits:
+                await credits.grant(db, u.id, starting_credits, CreditEventType.GRANT_SIGNUP)
+            await db.commit()
+            track["users"].append(u.id)
+            return u.id
+    return _make

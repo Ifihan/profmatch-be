@@ -1,123 +1,94 @@
-"""Search credits service: balance calculation, deduction, replenishment."""
-
-from datetime import UTC, datetime, timedelta
-
-from sqlalchemy import select
-
-from app.models.database import AnonymousUsage, SearchCredit, SearchUsage
-from app.services.database import async_session
-
-REPLENISH_HOURS = 72  # 1 free credit every 3 days
-MAX_FREE_CREDITS = 3
-MAX_ANONYMOUS_SEARCHES = 1
+"""Credit ledger: balance is the running sum of an append-only event log.
+Regen is computed lazily on read (no cron) by materialising owed events."""
+from datetime import datetime, timedelta, timezone
+from sqlalchemy import select, func, text
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.config import settings
+from app.models import CreditEvent, CreditEventType
 
 
-async def get_or_create_credits(user_id: str) -> SearchCredit:
-    """Get credit record for a user, creating one with 3 credits if missing."""
-    async with async_session() as db:
-        result = await db.execute(
-            select(SearchCredit).where(SearchCredit.user_id == user_id)
-        )
-        credit = result.scalar_one_or_none()
-
-        if not credit:
-            credit = SearchCredit(user_id=user_id, balance=3)
-            db.add(credit)
-            await db.commit()
-            await db.refresh(credit)
-
-        return credit
+async def _lock_user(db: AsyncSession, user_id: str) -> None:
+    """Serialize a user's credit mutations for the current transaction via a
+    transaction-scoped advisory lock (prevents double-spend). Safe to nest."""
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": f"credit:{user_id}"}
+    )
 
 
-def calculate_available_credits(credit: SearchCredit) -> int:
-    """Calculate balance including any earned free credits."""
-    if credit.balance >= MAX_FREE_CREDITS:
-        return credit.balance  # Already at or above free cap
-
-    hours_since_last = (datetime.now(UTC) - credit.last_free_credit_at).total_seconds() / 3600
-    earned = int(hours_since_last // REPLENISH_HOURS)
-    return min(credit.balance + earned, MAX_FREE_CREDITS)
+async def _raw_balance(db: AsyncSession, user_id: str) -> int:
+    stmt = select(func.coalesce(func.sum(CreditEvent.delta), 0)).where(
+        CreditEvent.user_id == user_id
+    )
+    return int((await db.execute(stmt)).scalar_one())
 
 
-def next_free_credit_at(credit: SearchCredit) -> datetime | None:
-    """Return when the next free credit will be available, or None if balance >= 3."""
-    effective_balance = calculate_available_credits(credit)
-    if effective_balance >= MAX_FREE_CREDITS:
-        return None
-    hours_since_last = (datetime.now(UTC) - credit.last_free_credit_at).total_seconds() / 3600
-    earned = int(hours_since_last // REPLENISH_HOURS)
-    return credit.last_free_credit_at + timedelta(hours=(earned + 1) * REPLENISH_HOURS)
+async def _last_event_at(db: AsyncSession, user_id: str) -> datetime | None:
+    stmt = select(func.max(CreditEvent.created_at)).where(CreditEvent.user_id == user_id)
+    return (await db.execute(stmt)).scalar_one()
 
 
-async def deduct_credit(*, user_id: str, match_id: str, university: str) -> bool:
-    """Deduct 1 credit. Returns True if successful, False if insufficient balance."""
-    async with async_session() as db:
-        result = await db.execute(
-            select(SearchCredit).where(SearchCredit.user_id == user_id)
-        )
-        credit = result.scalar_one_or_none()
+async def _apply_lazy_regen(db: AsyncSession, user_id: str) -> None:
+    """If the user is below max and time has passed since their last event,
+    materialise the owed regen events (capped at max)."""
+    await _lock_user(db, user_id)
+    balance = await _raw_balance(db, user_id)
+    if balance >= settings.registered_max_credits:
+        return
+    last = await _last_event_at(db, user_id)
+    if last is None:
+        return
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
 
-        if not credit:
-            # Auto-create with 3 credits
-            credit = SearchCredit(user_id=user_id, balance=3)
-            db.add(credit)
-            await db.flush()
+    interval = timedelta(hours=settings.credit_regen_interval_hours)
+    now = datetime.now(timezone.utc)
+    earned = int((now - last) // interval)
+    if earned <= 0:
+        return
 
-        # Apply any earned free credits before deducting
-        effective_balance = calculate_available_credits(credit)
-        if effective_balance <= 0:
-            return False
-
-        # Persist the earned credits + deduction
-        credit.balance = effective_balance - 1
-        credit.last_free_credit_at = datetime.now(UTC)
-
-        # Log usage
-        db.add(SearchUsage(
+    grantable = min(earned, settings.registered_max_credits - balance)
+    for i in range(grantable):
+        db.add(CreditEvent(
             user_id=user_id,
-            match_id=match_id,
-            university=university,
+            event_type=CreditEventType.GRANT_REGEN,
+            delta=1,
+            # backdate so the regen clock stays consistent
+            created_at=last + interval * (i + 1),
         ))
-
-        await db.commit()
-        return True
+    await db.flush()
 
 
-async def check_anonymous_limit(ip: str) -> bool:
-    """Return True if the IP has anonymous searches remaining."""
-    async with async_session() as db:
-        result = await db.execute(
-            select(AnonymousUsage).where(AnonymousUsage.ip_address == ip)
-        )
-        usage = result.scalar_one_or_none()
-        if not usage:
-            return True
-        return usage.search_count < MAX_ANONYMOUS_SEARCHES
+async def get_balance(db: AsyncSession, user_id: str) -> int:
+    await _apply_lazy_regen(db, user_id)
+    return await _raw_balance(db, user_id)
 
 
-async def record_anonymous_search(ip: str) -> None:
-    """Increment anonymous search count for an IP (upsert)."""
-    async with async_session() as db:
-        result = await db.execute(
-            select(AnonymousUsage).where(AnonymousUsage.ip_address == ip)
-        )
-        usage = result.scalar_one_or_none()
-
-        if usage:
-            usage.search_count += 1
-        else:
-            db.add(AnonymousUsage(ip_address=ip, search_count=1))
-
-        await db.commit()
+async def grant(
+    db: AsyncSession, user_id: str, amount: int,
+    event_type: CreditEventType, reference: str | None = None,
+) -> None:
+    db.add(CreditEvent(
+        user_id=user_id, event_type=event_type, delta=abs(amount), reference=reference
+    ))
+    await db.flush()
 
 
-async def get_usage_history(user_id: str, *, limit: int = 20) -> list[SearchUsage]:
-    """Get recent search usage for a user."""
-    async with async_session() as db:
-        result = await db.execute(
-            select(SearchUsage)
-            .where(SearchUsage.user_id == user_id)
-            .order_by(SearchUsage.created_at.desc())
-            .limit(limit)
-        )
-        return list(result.scalars().all())
+async def try_spend(db: AsyncSession, user_id: str, reference: str) -> bool:
+    """Spend one credit atomically; False if the balance is empty. Runs in the
+    same transaction that creates the job, so they commit together."""
+    await _lock_user(db, user_id)
+    balance = await get_balance(db, user_id)
+    if balance < 1:
+        return False
+    db.add(CreditEvent(
+        user_id=user_id,
+        event_type=CreditEventType.SPEND_SEARCH,
+        delta=-1,
+        reference=reference,
+    ))
+    await db.flush()
+    return True
+
+
+async def refund(db: AsyncSession, user_id: str, reference: str) -> None:
+    await grant(db, user_id, 1, CreditEventType.GRANT_REFUND, reference)
