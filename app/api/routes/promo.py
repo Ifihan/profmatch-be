@@ -19,7 +19,12 @@ class RedeemRequest(BaseModel):
     code: str
 
 
-@router.post("/redeem")
+class RedeemResponse(BaseModel):
+    credits_granted: int
+    balance: int
+
+
+@router.post("/redeem", response_model=RedeemResponse)
 async def redeem(
     body: RedeemRequest,
     db: AsyncSession = Depends(get_db),

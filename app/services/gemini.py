@@ -1,8 +1,8 @@
-"""Thin async wrapper around the Gemini SDK for text, JSON, and embeddings.
-
-Centralised so the rest of the code never imports the SDK directly.
-"""
+"""Thin async wrapper around the Gemini SDK so nothing else imports it directly."""
 import json
+
+from google import genai
+from google.genai import types
 from app.core.config import settings
 
 _client = None
@@ -11,14 +11,16 @@ _client = None
 def _get_client():
     global _client
     if _client is None:
-        from google import genai
-        _client = genai.Client(api_key=settings.gemini_api_key)
+        # Bound each call so a hung request can't stall the whole job (ms).
+        _client = genai.Client(
+            api_key=settings.gemini_api_key,
+            http_options=types.HttpOptions(timeout=120_000),
+        )
     return _client
 
 
 def _extract_json(text: str) -> str:
-    """Strip markdown fences and trim to the outermost JSON bounds — models
-    occasionally wrap or append stray characters even in JSON mode."""
+    """Strip markdown fences and trim to the outermost JSON bounds."""
     text = text.strip()
     if text.startswith("```"):
         text = text.split("```")[1].lstrip("json").strip() if "```" in text[3:] else text[3:]
@@ -28,8 +30,7 @@ def _extract_json(text: str) -> str:
 
 
 async def generate_json(prompt: str) -> dict | list:
-    """Call Gemini and parse a JSON response. The prompt MUST instruct the model
-    to return only JSON. Retries once if the response isn't valid JSON."""
+    """Call Gemini and parse a JSON response (prompt must ask for JSON only); retries once."""
     client = _get_client()
     error: json.JSONDecodeError | None = None
     for _ in range(2):

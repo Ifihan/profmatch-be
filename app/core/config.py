@@ -10,6 +10,13 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 14
 
+    # comma-separated allowed origins (credentialed CORS can't use "*")
+    cors_origins: str = "http://localhost:3000"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
     database_url: str = "postgresql+asyncpg://profmatch:profmatch@localhost:5432/profmatch"
     redis_url: str = "redis://localhost:6379/0"
     arq_queue_name: str = "arq:queue"  # set per deploy to isolate preview queues

@@ -1,5 +1,4 @@
-"""Stage 3: enrich each professor with publications + metrics, concurrently.
-OpenAlex first (canonical), then Semantic Scholar, then Crossref."""
+"""Stage 3: enrich professors with publications + metrics concurrently (OpenAlex → Semantic Scholar → Crossref)."""
 import asyncio
 import httpx
 from app.services.enrichment import openalex, fallback
@@ -38,8 +37,7 @@ async def _resolve_openalex_author(
             return author
     except Exception:
         pass
-    # ORCID can disambiguate common names when the scoped search missed; only
-    # trusted as a fallback so a fragile single match can't override a good one.
+    # ORCID disambiguates common names the scoped search missed; fallback-only.
     try:
         orcid = await fallback.orcid_id(client, name, prof.get("university"))
         if orcid:

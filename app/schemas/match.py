@@ -53,3 +53,10 @@ class JobStatusResponse(BaseModel):
     progress: int
     result: MatchResultsResponse | None = None  # populated once status == "done"
     error: str | None = None
+
+
+class SearchDetailResponse(JobStatusResponse):
+    """Search-history detail: status envelope plus the original request fields."""
+    university_url: str | None = None
+    research_interests: str | None = None
+    created_at: datetime

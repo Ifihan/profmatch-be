@@ -9,29 +9,42 @@ from app.core.db import get_db
 from app.models import (
     User, MatchJob, CreditEvent, CreditEventType, PromoCode, PromoRedemption,
 )
+from app.schemas.admin import (
+    MetricsResponse, PromoResponse, CreatePromoResponse, PromoToggleResponse,
+    OkResponse, UserSummary, UserDetail,
+)
 from app.services import credits
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
 
-@router.get("/metrics")
+@router.get("/metrics", response_model=MetricsResponse)
 async def metrics(db: AsyncSession = Depends(get_db)):
-    total_users = (await db.execute(select(func.count(User.id)))).scalar_one()
-    total_searches = (await db.execute(select(func.count(MatchJob.id)))).scalar_one()
-    paid_users = (await db.execute(
+    # All four counts as scalar subqueries in one SELECT — a single round-trip.
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    total_users = select(func.count(User.id)).scalar_subquery()
+    total_searches = select(func.count(MatchJob.id)).scalar_subquery()
+    paid_users = (
         select(func.count(func.distinct(CreditEvent.user_id)))
         .where(CreditEvent.event_type == CreditEventType.GRANT_PURCHASE)
-    )).scalar_one()
-    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
-    active_users = (await db.execute(
+        .scalar_subquery()
+    )
+    active_users = (
         select(func.count(func.distinct(MatchJob.user_id)))
         .where(MatchJob.user_id.is_not(None), MatchJob.created_at >= cutoff)
-    )).scalar_one()
+        .scalar_subquery()
+    )
+    row = (await db.execute(select(
+        total_users.label("total_users"),
+        active_users.label("active_users"),
+        total_searches.label("total_searches"),
+        paid_users.label("paid_users"),
+    ))).one()
     return {
-        "total_users": total_users,
-        "active_users": active_users,
-        "total_searches": total_searches,
-        "paid_users": paid_users,
+        "total_users": row.total_users,
+        "active_users": row.active_users,
+        "total_searches": row.total_searches,
+        "paid_users": row.paid_users,
     }
 
 
@@ -45,7 +58,7 @@ class CreatePromo(BaseModel):
     max_redemptions: int | None = None
 
 
-@router.post("/promo", status_code=201)
+@router.post("/promo", status_code=201, response_model=CreatePromoResponse)
 async def create_promo(body: CreatePromo, db: AsyncSession = Depends(get_db)):
     promo = PromoCode(code=body.code, credits=body.credits, max_redemptions=body.max_redemptions)
     db.add(promo)
@@ -53,27 +66,37 @@ async def create_promo(body: CreatePromo, db: AsyncSession = Depends(get_db)):
     return {"id": promo.id, "code": promo.code}
 
 
-@router.get("/promo")
+@router.get("/promo", response_model=list[PromoResponse])
 async def list_promos(db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(PromoCode))).scalars().all()
     return [
         {"id": p.id, "code": p.code, "credits": p.credits,
+         "max_redemptions": p.max_redemptions,
          "times_redeemed": p.times_redeemed, "is_disabled": p.is_disabled}
         for p in rows
     ]
 
 
-@router.patch("/promo/{promo_id}/disable")
-async def disable_promo(promo_id: str, db: AsyncSession = Depends(get_db)):
+async def _set_promo_disabled(promo_id: str, disabled: bool, db: AsyncSession) -> dict:
     promo = (await db.execute(select(PromoCode).where(PromoCode.id == promo_id))).scalar_one_or_none()
     if not promo:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-    promo.is_disabled = True
+    promo.is_disabled = disabled
     await db.commit()
-    return {"ok": True}
+    return {"ok": True, "is_disabled": disabled}
 
 
-@router.delete("/promo/{promo_id}")
+@router.patch("/promo/{promo_id}/disable", response_model=PromoToggleResponse)
+async def disable_promo(promo_id: str, db: AsyncSession = Depends(get_db)):
+    return await _set_promo_disabled(promo_id, True, db)
+
+
+@router.patch("/promo/{promo_id}/enable", response_model=PromoToggleResponse)
+async def enable_promo(promo_id: str, db: AsyncSession = Depends(get_db)):
+    return await _set_promo_disabled(promo_id, False, db)
+
+
+@router.delete("/promo/{promo_id}", response_model=OkResponse)
 async def delete_promo(promo_id: str, db: AsyncSession = Depends(get_db)):
     promo = (await db.execute(select(PromoCode).where(PromoCode.id == promo_id))).scalar_one_or_none()
     if not promo:
@@ -84,7 +107,7 @@ async def delete_promo(promo_id: str, db: AsyncSession = Depends(get_db)):
     return {"ok": True}
 
 
-@router.get("/users")
+@router.get("/users", response_model=list[UserSummary])
 async def list_users(
     limit: int = 50, offset: int = 0, db: AsyncSession = Depends(get_db)
 ):
@@ -99,7 +122,7 @@ async def list_users(
     ]
 
 
-@router.get("/users/{user_id}")
+@router.get("/users/{user_id}", response_model=UserDetail)
 async def get_user(user_id: str, db: AsyncSession = Depends(get_db)):
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not user:
@@ -113,7 +136,7 @@ async def get_user(user_id: str, db: AsyncSession = Depends(get_db)):
     }
 
 
-@router.patch("/users/{user_id}/disable")
+@router.patch("/users/{user_id}/disable", response_model=OkResponse)
 async def disable_user(user_id: str, db: AsyncSession = Depends(get_db)):
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not user:
@@ -123,13 +146,12 @@ async def disable_user(user_id: str, db: AsyncSession = Depends(get_db)):
     return {"ok": True}
 
 
-@router.delete("/users/{user_id}")
+@router.delete("/users/{user_id}", response_model=OkResponse)
 async def delete_user(user_id: str, db: AsyncSession = Depends(get_db)):
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-    # Remove dependent rows first (credit_events / promo_redemptions are FKs;
-    # match_jobs holds the user's CV text and should not be orphaned).
+    # Remove dependent rows first (FK children + the user's match_jobs).
     await db.execute(delete(CreditEvent).where(CreditEvent.user_id == user_id))
     await db.execute(delete(PromoRedemption).where(PromoRedemption.user_id == user_id))
     await db.execute(delete(MatchJob).where(MatchJob.user_id == user_id))

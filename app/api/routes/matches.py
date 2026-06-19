@@ -1,8 +1,8 @@
-"""Match endpoints: POST creates a credit-spending job and returns its id; GET
-polls status/results. Anonymous users get one free search via a signed cookie."""
+"""Match endpoints: POST creates a credit-spending job; GET polls status/results (anon gets one free search via cookie)."""
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 from app.api.deps import get_optional_user, get_or_set_anon_id, ANON_COOKIE
 from app.core.config import settings
 from app.core.db import get_db
@@ -15,21 +15,39 @@ from app.workers.queue import enqueue_match_job
 
 router = APIRouter(prefix="/matches", tags=["matches"])
 
+STATUS_COLUMNS = (
+    MatchJob.id, MatchJob.user_id, MatchJob.anon_session_id,
+    MatchJob.status, MatchJob.progress, MatchJob.total_analyzed,
+    MatchJob.processing_seconds, MatchJob.error,
+    MatchJob.university_url, MatchJob.research_interests, MatchJob.created_at,
+)
+
+
+def status_only(stmt):
+    """Apply load_only(STATUS_COLUMNS) so the heavy blobs aren't fetched."""
+    return stmt.options(load_only(*STATUS_COLUMNS))
+
+
+async def load_results(db: AsyncSession, job_id: str) -> list | None:
+    """Fetch just the results blob for a finished job (deferred columns can't async lazy-load)."""
+    return (await db.execute(
+        select(MatchJob.results).where(MatchJob.id == job_id)
+    )).scalar_one_or_none()
+
 
 async def _anon_search_count(db: AsyncSession, anon_id: str) -> int:
     stmt = select(func.count(MatchJob.id)).where(MatchJob.anon_session_id == anon_id)
     return int((await db.execute(stmt)).scalar_one())
 
 
-def build_job_status(job: MatchJob) -> JobStatusResponse:
-    """Job row -> status envelope, embedding the saved results once done.
-    Shared by GET /matches/{id} and the per-user search-history detail route."""
+def build_job_status(job: MatchJob, results: list | None = None) -> JobStatusResponse:
+    """Job row -> status envelope; results is passed in (loaded only when done), not read off the row."""
     result = None
-    if job.status == JobStatus.DONE and job.results is not None:
+    if job.status == JobStatus.DONE and results is not None:
         result = MatchResultsResponse(
             session_id=job.id,
-            matches=job.results,
-            total_professors_analyzed=job.total_analyzed or len(job.results),
+            matches=results,
+            total_professors_analyzed=job.total_analyzed or len(results),
             processing_time_seconds=job.processing_seconds or 0.0,
         )
     return JobStatusResponse(
@@ -83,8 +101,15 @@ async def create_match(
         job.anon_session_id = anon_id
         db.add(job)
         await db.flush()
+        # Cross-site cookies need SameSite=None+Secure in prod; Lax on localhost dev.
+        secure = settings.env != "development"
         response.set_cookie(
-            ANON_COOKIE, anon_id, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 365
+            ANON_COOKIE,
+            anon_id,
+            httponly=True,
+            secure=secure,
+            samesite="none" if secure else "lax",
+            max_age=60 * 60 * 24 * 365,
         )
 
     await db.commit()
@@ -112,7 +137,9 @@ async def get_match(
     db: AsyncSession = Depends(get_db),
     user: User | None = Depends(get_optional_user),
 ):
-    job = (await db.execute(select(MatchJob).where(MatchJob.id == job_id))).scalar_one_or_none()
+    job = (await db.execute(
+        status_only(select(MatchJob).where(MatchJob.id == job_id))
+    )).scalar_one_or_none()
     if job is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
 
@@ -123,4 +150,6 @@ async def get_match(
     if not owns:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your job")
 
-    return build_job_status(job)
+    # Only pull the (large) results blob once the job is actually done.
+    results = await load_results(db, job.id) if job.status == JobStatus.DONE else None
+    return build_job_status(job, results)

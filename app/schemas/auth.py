@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
@@ -60,3 +62,23 @@ class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
+
+
+class MeResponse(BaseModel):
+    id: str
+    name: str
+    email: str
+    is_admin: bool
+    created_at: datetime
+    credit_balance: int
+
+
+class SearchSummary(BaseModel):
+    job_id: str
+    status: str
+    progress: int
+    university_url: str | None = None
+    research_interests: str | None = None
+    total_professors_analyzed: int | None = None
+    match_count: int
+    created_at: datetime

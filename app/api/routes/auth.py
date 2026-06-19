@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
-from app.api.routes.matches import build_job_status
+from app.api.routes.matches import build_job_status, status_only, load_results
 from app.core.db import get_db
 from app.core.rate_limit import limiter
 from app.core.config import settings
@@ -12,12 +12,13 @@ from app.core.security import (
     hash_password, verify_password, create_access_token,
     create_refresh_token, create_reset_token, decode_token,
 )
-from app.models import User, CreditEventType, MatchJob
+from app.models import User, CreditEventType, MatchJob, JobStatus
 from app.schemas.auth import (
     SignupRequest, LoginRequest, ForgotPasswordRequest,
     ResetPasswordRequest, RefreshRequest, TokenResponse,
+    MeResponse, SearchSummary,
 )
-from app.schemas.match import JobStatusResponse
+from app.schemas.match import JobStatusResponse, SearchDetailResponse
 from app.services import credits
 
 logger = logging.getLogger("profmatch.auth")
@@ -102,7 +103,7 @@ async def refresh(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
     )
 
 
-@router.get("/me")
+@router.get("/me", response_model=MeResponse)
 async def me(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     balance = await credits.get_balance(db, user.id)
     await db.commit()  # persist any lazy-regen surfaced during the balance read
@@ -116,7 +117,7 @@ async def me(db: AsyncSession = Depends(get_db), user: User = Depends(get_curren
     }
 
 
-@router.get("/me/searches")
+@router.get("/me/searches", response_model=list[SearchSummary])
 async def my_searches(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     jobs = (await db.execute(
         select(MatchJob).where(MatchJob.user_id == user.id).order_by(MatchJob.created_at.desc())
@@ -136,13 +137,21 @@ async def my_searches(db: AsyncSession = Depends(get_db), user: User = Depends(g
     ]
 
 
-@router.get("/me/searches/{search_id}", response_model=JobStatusResponse)
+@router.get("/me/searches/{search_id}", response_model=SearchDetailResponse)
 async def my_search(
     search_id: str,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    job = (await db.execute(select(MatchJob).where(MatchJob.id == search_id))).scalar_one_or_none()
+    job = (await db.execute(
+        status_only(select(MatchJob).where(MatchJob.id == search_id))
+    )).scalar_one_or_none()
     if job is None or job.user_id != user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Search not found")
-    return build_job_status(job)
+    results = await load_results(db, job.id) if job.status == JobStatus.DONE else None
+    return SearchDetailResponse(
+        **build_job_status(job, results).model_dump(),
+        university_url=job.university_url,
+        research_interests=job.research_interests,
+        created_at=job.created_at,
+    )

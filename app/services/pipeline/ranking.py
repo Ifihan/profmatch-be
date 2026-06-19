@@ -46,7 +46,7 @@ def _to_publication(pub: dict) -> dict:
     }
 
 
-async def run(profile_text: str, shortlist: list[dict], top_n: int = 15) -> list[dict]:
+async def run(profile_text: str, shortlist: list[dict], top_n: int = 10) -> list[dict]:
     shortlist = shortlist[:top_n]
     slim = [
         {
@@ -58,10 +58,14 @@ async def run(profile_text: str, shortlist: list[dict], top_n: int = 15) -> list
         }
         for p in shortlist
     ]
-    result = await generate_json(
-        _PROMPT.format(profile=profile_text[:4000], candidates=json.dumps(slim))
-    )
-    by_name = {m.get("name"): m for m in result.get("matches", [])}
+    try:
+        result = await generate_json(
+            _PROMPT.format(profile=profile_text[:4000], candidates=json.dumps(slim))
+        )
+        by_name = {m.get("name"): m for m in result.get("matches", [])}
+    except Exception:
+        # LLM re-rank failed — degrade to embedding-order results, scores via _score below.
+        by_name = {}
 
     now = datetime.now(timezone.utc)
     final: list[dict] = []

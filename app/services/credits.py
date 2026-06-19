@@ -1,5 +1,4 @@
-"""Credit ledger: balance is the running sum of an append-only event log.
-Regen is computed lazily on read (no cron) by materialising owed events."""
+"""Credit ledger: balance is SUM of an append-only event log; regen materialised lazily on read."""
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,8 +7,7 @@ from app.models import CreditEvent, CreditEventType
 
 
 async def _lock_user(db: AsyncSession, user_id: str) -> None:
-    """Serialize a user's credit mutations for the current transaction via a
-    transaction-scoped advisory lock (prevents double-spend). Safe to nest."""
+    """Serialize a user's credit mutations via a transaction-scoped advisory lock; safe to nest."""
     await db.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": f"credit:{user_id}"}
     )
@@ -28,8 +26,7 @@ async def _last_event_at(db: AsyncSession, user_id: str) -> datetime | None:
 
 
 async def _apply_lazy_regen(db: AsyncSession, user_id: str) -> None:
-    """If the user is below max and time has passed since their last event,
-    materialise the owed regen events (capped at max)."""
+    """Materialise owed regen events (capped at max) when below max and time has passed."""
     await _lock_user(db, user_id)
     balance = await _raw_balance(db, user_id)
     if balance >= settings.registered_max_credits:
@@ -74,8 +71,7 @@ async def grant(
 
 
 async def try_spend(db: AsyncSession, user_id: str, reference: str) -> bool:
-    """Spend one credit atomically; False if the balance is empty. Runs in the
-    same transaction that creates the job, so they commit together."""
+    """Spend one credit atomically (False if empty); shares the job-creating transaction."""
     await _lock_user(db, user_id)
     balance = await get_balance(db, user_id)
     if balance < 1:

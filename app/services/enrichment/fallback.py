@@ -1,5 +1,4 @@
-"""Secondary/tertiary enrichment, used only when OpenAlex has no match. OpenAlex
-stays the canonical citation figure — Semantic Scholar's counts run higher."""
+"""Secondary/tertiary enrichment when OpenAlex has no match; OpenAlex stays canonical for citations."""
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 from app.core.config import settings
@@ -23,8 +22,7 @@ async def semantic_scholar_author(client: httpx.AsyncClient, name: str) -> dict 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
 async def orcid_id(client: httpx.AsyncClient, name: str, institution: str | None) -> str | None:
-    """Resolve a single ORCID for a name (+ affiliation) to disambiguate common
-    names. Only returns when exactly one record matches — ambiguity is no help."""
+    """Resolve a single ORCID for a name (+ affiliation); returns only on an unambiguous match."""
     query = f'family-name:"{name.split()[-1]}" AND given-names:"{name.split()[0]}"' if name.split() else name
     if institution:
         query += f' AND affiliation-org-name:"{institution}"'
@@ -41,8 +39,7 @@ async def orcid_id(client: httpx.AsyncClient, name: str, institution: str | None
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
 async def crossref_works(client: httpx.AsyncClient, name: str, limit: int = 8) -> list[dict]:
-    """Tertiary publication source. Crossref is work-centric (no author metrics),
-    so it fills publications only — OpenAlex stays canonical for citations."""
+    """Tertiary source: Crossref fills publications only (no author metrics)."""
     params = {
         "query.author": name,
         "rows": limit,

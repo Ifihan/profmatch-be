@@ -1,5 +1,6 @@
-"""OpenAlex client — primary publication/metrics source (all disciplines, no auth).
-A `mailto` enters the polite pool for higher, more reliable rate limits."""
+"""OpenAlex client — primary publication/metrics source; `mailto` enters the polite pool."""
+from urllib.parse import urlparse
+
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 from app.core.config import settings
@@ -41,7 +42,6 @@ async def find_institution(client: httpx.AsyncClient, name: str) -> dict | None:
 
 
 def _homepage_host(inst: dict) -> str:
-    from urllib.parse import urlparse
     host = urlparse(inst.get("homepage_url") or "").netloc.lower().split(":")[0]
     return host[4:] if host.startswith("www.") else host
 
@@ -50,8 +50,7 @@ def _homepage_host(inst: dict) -> str:
 async def find_institution_by_domain(
     client: httpx.AsyncClient, domain: str, name_hint: str, queries: list[str]
 ) -> dict | None:
-    """Resolve an institution and verify it by homepage domain, so a bad name
-    guess can't match an unrelated institution in another country."""
+    """Resolve an institution and verify it by homepage domain to avoid wrong-name matches."""
     for q in dict.fromkeys([name_hint, *queries]):
         if not q:
             continue
@@ -72,8 +71,7 @@ async def find_institution_by_domain(
 async def institution_authors(
     client: httpx.AsyncClient, institution_id: str, limit: int = 25
 ) -> list[dict]:
-    """Top authors affiliated with an institution — discovery fallback when the
-    site scrape yields too few faculty."""
+    """Top authors at an institution — discovery fallback when the site scrape finds too few."""
     params = {
         "filter": f"last_known_institutions.id:{institution_id}",
         "sort": "cited_by_count:desc",

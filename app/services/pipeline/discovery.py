@@ -1,6 +1,4 @@
-"""Stage 2: LLM-guided faculty discovery. Crawls the school's own site (the most
-reliable signal of current staff), respecting robots.txt and a time budget, and
-falls back to a domain-verified OpenAlex search only when too few are found."""
+"""Stage 2: LLM-guided faculty discovery — crawl the school's site (robots.txt + time budget), fall back to domain-verified OpenAlex when too few are found."""
 import re
 import time
 from urllib.parse import urljoin, urlparse
@@ -16,7 +14,7 @@ _UA = "ProfMatchBot/1.0 (+https://profmatch.example)"
 _UA_TOKEN = "ProfMatchBot"
 _DEADLINE_SECONDS = 60
 _MAX_PAGES = 12
-_TARGET_FACULTY = 40
+_TARGET_FACULTY = 20
 _MIN_FACULTY = 5
 
 _GENERIC = {"ac", "edu", "co", "gov", "org", "com", "net", "sch", "uni", "univ", "www"}
@@ -174,8 +172,7 @@ def _field_terms(field: str) -> list[str]:
 
 def _priority(url: str, text: str, field_terms: list[str]) -> int:
     s = (url + " " + text).lower()
-    # Field relevance dominates so we drill into the student's department before
-    # generic, alphabetical staff directories.
+    # Field relevance dominates so we drill into the student's department first.
     p = 4 * sum(1 for t in field_terms if t in s)
     p += 2 if any(h in s for h in _STAFF_HINTS) else 0
     p += 1 if any(h in s for h in _SECTION_HINTS) else 0

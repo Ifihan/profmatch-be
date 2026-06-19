@@ -1,5 +1,4 @@
-"""ARQ queue wiring. enqueue_match_job is called by the API; run_match_job runs
-in the worker process (see worker.py)."""
+"""ARQ queue wiring: API calls enqueue_match_job; the worker runs run_match_job (see worker.py)."""
 from arq import create_pool
 from arq.connections import RedisSettings
 from app.core.config import settings

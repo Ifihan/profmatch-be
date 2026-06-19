@@ -1,10 +1,7 @@
-"""Background worker: runs the 5-stage pipeline, checkpointing each stage to the
-job row so a client refresh or worker crash never restarts from zero.
-
-Run with:  arq app.workers.worker.WorkerSettings
-"""
-from sqlalchemy import select
+"""Background worker: runs the 5-stage pipeline, checkpointing each stage to the job row (run: arq app.workers.worker.WorkerSettings)."""
 import time
+
+from sqlalchemy import select
 from arq.connections import RedisSettings
 from app.core.config import settings
 from app.core.db import SessionLocal
@@ -78,4 +75,4 @@ class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     queue_name = settings.arq_queue_name
     max_jobs = 10
-    job_timeout = 300
+    job_timeout = 600  # the crawl + enrichment + LLM re-rank can exceed 5 min
