@@ -1,12 +1,17 @@
-"""Match endpoints: POST creates a credit-spending job; GET polls status/results (anon gets one free search via cookie)."""
+"""Match endpoints: POST creates a credit-spending job; GET polls (or SSE-streams) status/results (anon gets one free search via cookie)."""
+import asyncio
+import json
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 from app.api.deps import get_optional_user, get_or_set_anon_id, ANON_COOKIE
 from app.core.config import settings
-from app.core.db import get_db
+from app.core.db import get_db, SessionLocal
 from app.core.rate_limit import limiter
+from app.core.security import decode_token
 from app.models import MatchJob, JobStatus, User
 from app.schemas.match import JobStatusResponse, MatchResultsResponse
 from app.services import credits
@@ -14,6 +19,8 @@ from app.services.cv import extract_cv_text
 from app.workers.queue import enqueue_match_job
 
 router = APIRouter(prefix="/matches", tags=["matches"])
+
+_SSE_POLL_SECONDS = 2  # server-side DB poll cadence; clients hold one connection
 
 STATUS_COLUMNS = (
     MatchJob.id, MatchJob.user_id, MatchJob.anon_session_id,
@@ -153,3 +160,69 @@ async def get_match(
     # Only pull the (large) results blob once the job is actually done.
     results = await load_results(db, job.id) if job.status == JobStatus.DONE else None
     return build_job_status(job, results)
+
+
+async def _user_from_token(db: AsyncSession, token: str | None) -> User | None:
+    """Resolve a user from an access token in a query param — native EventSource
+    can't set an Authorization header, so SSE clients pass ?token=."""
+    if not token:
+        return None
+    try:
+        payload = decode_token(token)
+        if payload.get("type") != "access":
+            return None
+    except Exception:
+        return None
+    return (await db.execute(select(User).where(User.id == payload["sub"]))).scalar_one_or_none()
+
+
+@router.get("/{job_id}/events")
+async def stream_match(
+    job_id: str,
+    request: Request,
+    token: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+):
+    """Server-Sent Events stream of a job's status — one connection instead of
+    polling. Emits the same JobStatusResponse payload until done/failed."""
+    user = user or await _user_from_token(db, token)
+    anon_cookie = request.cookies.get(ANON_COOKIE)
+
+    job = (await db.execute(
+        status_only(select(MatchJob).where(MatchJob.id == job_id))
+    )).scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
+    owns = (user and job.user_id == user.id) or (
+        job.anon_session_id and job.anon_session_id == anon_cookie
+    )
+    if not owns:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your job")
+
+    async def event_stream():
+        last = None
+        while not await request.is_disconnected():
+            async with SessionLocal() as s:
+                j = (await s.execute(
+                    status_only(select(MatchJob).where(MatchJob.id == job_id))
+                )).scalar_one_or_none()
+                if j is None:
+                    break
+                results = await load_results(s, job_id) if j.status == JobStatus.DONE else None
+                payload = build_job_status(j, results).model_dump(mode="json")
+            data = json.dumps(payload)
+            if data != last:
+                yield f"data: {data}\n\n"
+                last = data
+            else:
+                yield ": ping\n\n"  # heartbeat keeps proxies from closing the idle stream
+            if j.status in (JobStatus.DONE, JobStatus.FAILED):
+                break
+            await asyncio.sleep(_SSE_POLL_SECONDS)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

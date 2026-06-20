@@ -35,7 +35,11 @@ async def health():
 
 
 # Match endpoints accept anonymous (cookie) OR bearer auth — advertise bearer as optional.
-_OPTIONAL_AUTH = {("/api/matches", "post"), ("/api/matches/{job_id}", "get")}
+_OPTIONAL_AUTH = {
+    ("/api/matches", "post"),
+    ("/api/matches/{job_id}", "get"),
+    ("/api/matches/{job_id}/events", "get"),
+}
 
 
 def _custom_openapi():
