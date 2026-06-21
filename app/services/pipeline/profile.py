@@ -8,12 +8,15 @@ Return ONLY JSON with this shape:
   "research_experience": [string],
   "skills": [string],
   "stated_interests": [string],
-  "key_topics": [string]
+  "key_topics": [string],
+  "research_focus": string
 }}
 
-Capture themes, methods, and theories from ANY academic discipline equally —
-e.g. "postcolonial literature" or "constitutional law" are as valid as
-"graph neural networks". Do not bias toward technical fields.
+- "key_topics": the student's RESEARCH themes/methods/theories only (e.g. "few-shot
+  learning", "postcolonial literature", "constitutional law"). EXCLUDE generic tools
+  and skills (e.g. "data analysis", "automation", "Python", "Excel").
+- "research_focus": 1-2 sentences describing the student's research direction.
+Capture themes from ANY discipline equally — do not bias toward technical fields.
 
 Typed research interests: {interests}
 
@@ -26,11 +29,12 @@ async def run(cv_text: str, research_interests: str) -> dict:
     profile = await generate_json(
         _PROMPT.format(interests=research_interests, cv=cv_text[:20000])
     )
-    # canonical profile string used for embedding later
+    # Embedding signal: lead with the stated interests so research direction
+    # dominates, then the focus summary and research topics — not CV skill noise.
     parts = (
-        profile.get("stated_interests", [])
+        [research_interests, profile.get("research_focus", "")]
+        + profile.get("stated_interests", [])
         + profile.get("key_topics", [])
-        + [research_interests]
     )
     profile["profile_text"] = " ; ".join(p for p in parts if p)
     return profile

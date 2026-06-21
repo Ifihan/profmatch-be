@@ -85,6 +85,37 @@ async def institution_authors(
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
+async def works_by_field(
+    client: httpx.AsyncClient, institution_id: str, query: str, limit: int = 100
+) -> list[dict]:
+    """Authors at an institution who publish on `query`, ranked by how often they
+    appear among the top-cited matching works — field-relevant candidate discovery."""
+    iid = institution_id.rstrip("/").rsplit("/", 1)[-1]
+    params = {
+        "filter": f"authorships.institutions.id:{iid}",
+        "search": query,
+        "sort": "cited_by_count:desc",
+        "per_page": limit,
+        "select": "authorships",
+        "mailto": settings.openalex_mailto,
+    }
+    r = await client.get(f"{BASE}/works", params=params, timeout=20)
+    r.raise_for_status()
+    agg: dict[str, dict] = {}
+    for work in r.json().get("results", []):
+        for a in work.get("authorships", []):
+            if iid not in {i.get("id", "").rstrip("/").rsplit("/", 1)[-1] for i in a.get("institutions", [])}:
+                continue
+            author = a.get("author") or {}
+            aid = author.get("id")
+            if not aid or not author.get("display_name"):
+                continue
+            entry = agg.setdefault(aid, {"id": aid, "display_name": author["display_name"], "score": 0})
+            entry["score"] += 1
+    return sorted(agg.values(), key=lambda x: x["score"], reverse=True)
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
 async def get_author(client: httpx.AsyncClient, author_id: str) -> dict | None:
     """Fetch a full author record (with summary_stats) by OpenAlex id or URL."""
     aid = author_id.rstrip("/").rsplit("/", 1)[-1]

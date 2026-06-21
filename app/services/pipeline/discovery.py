@@ -48,10 +48,13 @@ LINKS (url | anchor):
 """
 
 
-async def run(university_url: str, field: str, max_pages: int = _MAX_PAGES) -> list[dict]:
+async def run(
+    university_url: str, interests: str, key_topics: list[str] | None = None,
+    max_pages: int = _MAX_PAGES,
+) -> list[dict]:
     url = str(university_url)
     domain = _registrable_domain(url)
-    field_terms = _field_terms(field)
+    field_terms = _field_terms(interests)
     deadline = time.monotonic() + _DEADLINE_SECONDS
     robots: dict[str, RobotFileParser] = {}
 
@@ -60,14 +63,53 @@ async def run(university_url: str, field: str, max_pages: int = _MAX_PAGES) -> l
         institution_id = institution["id"] if institution else None
         university = institution["display_name"] if institution else _university_name(url)
 
-        faculty = await _crawl(client, url, domain, field, field_terms, robots, deadline, max_pages)
-        unique = _dedupe(faculty, university, institution_id)
+        # Primary: field-relevant authors via OpenAlex works search (right people,
+        # carrying author ids → precise enrichment).
+        pool: list[dict] = []
+        if institution_id:
+            pool = await _openalex_by_field(client, institution_id, university, interests, key_topics)
 
-        # Too few from the school's own site — fall back to its OpenAlex authors.
-        if len(unique) < _MIN_FACULTY and institution and time.monotonic() < deadline:
-            extra = await _openalex_fallback(client, institution, university, field_terms)
-            unique = _dedupe(unique + extra, university, institution_id)
-        return unique
+        # Fallback when OpenAlex is thin (under-indexed/non-STEM/unresolved institution):
+        # crawl the school's own site, then the affiliation-verified author list.
+        if len(pool) < _MIN_FACULTY:
+            scraped = await _crawl(client, url, domain, interests, field_terms, robots, deadline, max_pages)
+            pool = _dedupe(pool + scraped, university, institution_id)
+            if len(pool) < _MIN_FACULTY and institution:
+                extra = await _openalex_fallback(client, institution, university, field_terms)
+                pool = _dedupe(pool + extra, university, institution_id)
+        return pool[:_TARGET_FACULTY]
+
+
+def _interest_queries(interests: str, key_topics: list[str] | None) -> list[str]:
+    """Split typed interests into specific, multi-word OpenAlex queries; optionally
+    sharpen the first with a CV research theme (specific phrases cut cross-domain noise)."""
+    parts = re.split(r"[;,]|\band\b", interests, flags=re.IGNORECASE)
+    queries = [p.strip() for p in parts if len(p.strip()) > 2]
+    if key_topics and queries:
+        extra = next((t for t in key_topics if t and t.strip().lower() not in queries[0].lower()), None)
+        if extra:
+            queries.append(f"{queries[0]} {extra.strip()}")
+    return (queries or [interests.strip()])[:5]
+
+
+async def _openalex_by_field(
+    client: httpx.AsyncClient, institution_id: str, university: str,
+    interests: str, key_topics: list[str] | None,
+) -> list[dict]:
+    agg: dict[str, dict] = {}
+    for query in _interest_queries(interests, key_topics):
+        for a in await openalex.works_by_field(client, institution_id, query):
+            cur = agg.get(a["id"])
+            if cur is None or a["score"] > cur["_field_score"]:
+                agg[a["id"]] = {
+                    "name": a["display_name"],
+                    "designation": None, "faculty": None, "email": None,
+                    "profile_url": a["id"], "listed_interests": [],
+                    "university": university, "institution_id": institution_id,
+                    "openalex_id": a["id"], "_field_score": a["score"],
+                }
+    pool = sorted(agg.values(), key=lambda f: f["_field_score"], reverse=True)
+    return pool[:_TARGET_FACULTY]
 
 
 async def _crawl(client, start, domain, field, field_terms, robots, deadline, max_pages):

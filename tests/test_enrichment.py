@@ -3,8 +3,30 @@ import httpx
 import respx
 
 from app.services.pipeline import enrichment
+from app.services.enrichment import openalex
 
 OA = "https://api.openalex.org"
+
+
+@respx.mock
+async def test_works_by_field_aggregates_only_institution_authors():
+    respx.get(url__startswith=f"{OA}/works").mock(return_value=httpx.Response(200, json={"results": [
+        {"authorships": [
+            {"author": {"id": "A1", "display_name": "Jane Vision"},
+             "institutions": [{"id": "https://openalex.org/I1"}]},
+            {"author": {"id": "A2", "display_name": "Bob Elsewhere"},
+             "institutions": [{"id": "https://openalex.org/I9"}]},
+        ]},
+        {"authorships": [
+            {"author": {"id": "A1", "display_name": "Jane Vision"},
+             "institutions": [{"id": "I1"}]},
+        ]},
+    ]}))
+    async with httpx.AsyncClient() as c:
+        out = await openalex.works_by_field(c, "https://openalex.org/I1", "computer vision")
+    # Bob (other institution) excluded; Jane aggregated across both works
+    assert [a["display_name"] for a in out] == ["Jane Vision"]
+    assert out[0]["score"] == 2 and out[0]["id"] == "A1"
 
 
 @respx.mock

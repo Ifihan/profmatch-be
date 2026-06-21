@@ -66,6 +66,11 @@ async def _enrich(client: httpx.AsyncClient, prof: dict, institution_id: str | N
             out["research_corpus"] = " . ".join(
                 w.get("title", "") for w in works if w.get("title")
             )
+            if not out.get("listed_interests"):
+                out["listed_interests"] = [
+                    t.get("display_name") for t in (author.get("topics") or [])[:5]
+                    if t.get("display_name")
+                ]
             return out
         except Exception:
             pass

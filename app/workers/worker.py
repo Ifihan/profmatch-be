@@ -34,11 +34,12 @@ async def run_match_job(ctx, job_id: str):
                 await _set(job, db, student_profile=student_profile, progress=20)
             student_profile = job.student_profile
 
-            # Stage 2
+            # Stage 2 — query by the stated interests (not the diluted profile text)
             if job.faculty is None:
                 await _set(job, db, status=JobStatus.DISCOVERING, progress=30)
-                field = student_profile.get("profile_text", job.research_interests)
-                faculty = await discovery.run(job.university_url, field)
+                faculty = await discovery.run(
+                    job.university_url, job.research_interests, student_profile.get("key_topics"),
+                )
                 await _set(job, db, faculty=faculty, progress=45)
             faculty = job.faculty
 
