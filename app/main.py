@@ -6,7 +6,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from app.core.config import settings
 from app.core.rate_limit import limiter
-from app.api.routes import auth, matches, admin, credits, promo
+from app.api.routes import auth, matches, admin, credits, promo, internal
 
 app = FastAPI(title="ProfMatch API", version="2.0.0")
 app.state.limiter = limiter
@@ -20,7 +20,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for router in (auth.router, matches.router, admin.router, credits.router, promo.router):
+for router in (auth.router, matches.router, admin.router, credits.router, promo.router, internal.router):
     app.include_router(router, prefix="/api")
 
 

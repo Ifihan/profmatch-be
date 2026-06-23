@@ -1,9 +1,14 @@
 """Stage 3: enrich professors with publications + metrics concurrently (OpenAlex → Semantic Scholar → Crossref)."""
 import asyncio
+from datetime import date
+
 import httpx
+from app.core.config import settings
+from app.services import cache
 from app.services.enrichment import openalex, fallback
 
 _CONCURRENCY = 8
+_RECENT_YEARS = 5  # build the research corpus from work this recent, not 1979 classics
 
 
 async def run(faculty: list[dict]) -> list[dict]:
@@ -57,20 +62,33 @@ async def _enrich(client: httpx.AsyncClient, prof: dict, institution_id: str | N
     name = prof.get("name", "")
     out = dict(prof)
 
+    # Cache the OpenAlex-derived fields by author id (reused across students/searches).
+    oid = prof.get("openalex_id")
+    cache_key = f"prof:{oid.rstrip('/').rsplit('/', 1)[-1]}" if oid else None
+    if cache_key and (hit := await cache.get_json(cache_key)):
+        out.update(hit)
+        return out
+
     author = await _resolve_openalex_author(client, prof, institution_id)
     if author:
         try:
-            works = await openalex.author_works(client, author["id"], limit=8)
-            out["metrics"] = openalex.parse_metrics(author)
-            out["publications"] = [openalex.parse_work(w) for w in works]
-            out["research_corpus"] = " . ".join(
-                w.get("title", "") for w in works if w.get("title")
-            )
+            since = f"{date.today().year - _RECENT_YEARS}-01-01"
+            works = await openalex.author_works(client, author["id"], limit=8, since=since)
+            if len(works) < 3:  # sparse recent output — fall back to all-time
+                works = await openalex.author_works(client, author["id"], limit=8)
+            enr = {
+                "metrics": openalex.parse_metrics(author),
+                "publications": [openalex.parse_work(w) for w in works],
+                "research_corpus": " . ".join(w.get("title", "") for w in works if w.get("title")),
+            }
             if not out.get("listed_interests"):
-                out["listed_interests"] = [
+                enr["listed_interests"] = [
                     t.get("display_name") for t in (author.get("topics") or [])[:5]
                     if t.get("display_name")
                 ]
+            out.update(enr)
+            if cache_key:
+                await cache.set_json(cache_key, enr, settings.cache_professor_ttl)
             return out
         except Exception:
             pass

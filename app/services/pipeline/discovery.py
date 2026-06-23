@@ -1,12 +1,15 @@
 """Stage 2: LLM-guided faculty discovery — crawl the school's site (robots.txt + time budget), fall back to domain-verified OpenAlex when too few are found."""
 import re
 import time
+from datetime import date
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
 import httpx
 import trafilatura
 from selectolax.parser import HTMLParser
+from app.core.config import settings
+from app.services import cache
 from app.services.enrichment import openalex
 from app.services.gemini import generate_json
 
@@ -16,6 +19,8 @@ _DEADLINE_SECONDS = 60
 _MAX_PAGES = 12
 _TARGET_FACULTY = 20
 _MIN_FACULTY = 5
+_RECENCY_YEARS = 3       # require recent institutional activity within this window
+_RECENCY_MIN_WORKS = 2   # ...with at least this many works (single hits are noisy)
 
 _GENERIC = {"ac", "edu", "co", "gov", "org", "com", "net", "sch", "uni", "univ", "www"}
 _CCTLDS = {"za", "uk", "au", "ng", "ke", "gh", "in", "pk", "my", "sg", "nz", "ca", "us",
@@ -25,6 +30,14 @@ _CCTLDS = {"za", "uk", "au", "ng", "ke", "gh", "in", "pk", "my", "sg", "nz", "ca
 _STAFF_HINTS = ("staff", "people", "academic", "faculty", "professor", "lecturer",
                 "researcher", "member", "team", "directory")
 _SECTION_HINTS = ("school", "department", "dept", "institute", "faculty of", "centre", "center")
+
+# Ambiguous interest terms → concrete sub-queries, so OpenAlex hits the right concept
+# cluster (e.g. computational, not biomimetic-materials, for "bio-inspired computing").
+_TERM_EXPANSIONS = {
+    "bio-inspired computing": ["neuromorphic computing", "spiking neural networks", "evolutionary computation"],
+    "bio inspired computing": ["neuromorphic computing", "spiking neural networks", "evolutionary computation"],
+    "bio-inspired": ["neuromorphic computing", "evolutionary computation", "swarm intelligence"],
+}
 
 _PAGE_PROMPT = """You are navigating a university website to find its ACADEMIC STAFF
 for a student interested in: {field}.
@@ -59,7 +72,7 @@ async def run(
     robots: dict[str, RobotFileParser] = {}
 
     async with httpx.AsyncClient(follow_redirects=True, headers={"User-Agent": _UA}) as client:
-        institution = await _resolve_institution(client, domain)
+        institution = await _resolve_institution(client, url, domain)
         institution_id = institution["id"] if institution else None
         university = institution["display_name"] if institution else _university_name(url)
 
@@ -84,12 +97,16 @@ def _interest_queries(interests: str, key_topics: list[str] | None) -> list[str]
     """Split typed interests into specific, multi-word OpenAlex queries; optionally
     sharpen the first with a CV research theme (specific phrases cut cross-domain noise)."""
     parts = re.split(r"[;,]|\band\b", interests, flags=re.IGNORECASE)
-    queries = [p.strip() for p in parts if len(p.strip()) > 2]
+    queries: list[str] = []
+    for p in parts:
+        p = p.strip()
+        if len(p) > 2:
+            queries.extend(_TERM_EXPANSIONS.get(p.lower(), [p]))
     if key_topics and queries:
         extra = next((t for t in key_topics if t and t.strip().lower() not in queries[0].lower()), None)
         if extra:
             queries.append(f"{queries[0]} {extra.strip()}")
-    return (queries or [interests.strip()])[:5]
+    return (queries or [interests.strip()])[:6]
 
 
 async def _openalex_by_field(
@@ -108,8 +125,21 @@ async def _openalex_by_field(
                     "university": university, "institution_id": institution_id,
                     "openalex_id": a["id"], "_field_score": a["score"],
                 }
-    pool = sorted(agg.values(), key=lambda f: f["_field_score"], reverse=True)
-    return pool[:_TARGET_FACULTY]
+    candidates = sorted(agg.values(), key=lambda f: f["_field_score"], reverse=True)
+
+    # Recency gate: drop authors no longer publishing at the institution
+    # (affiliation lag / departures). Fall back to ungated if the gate errors/empties.
+    since = f"{date.today().year - _RECENCY_YEARS}-01-01"
+    try:
+        active = await openalex.recent_active_author_ids(
+            client, institution_id, [c["openalex_id"] for c in candidates],
+            since, _RECENCY_MIN_WORKS,
+        )
+        gated = [c for c in candidates if c["openalex_id"] in active]
+        candidates = gated or candidates
+    except Exception:
+        pass
+    return candidates[:_TARGET_FACULTY]
 
 
 async def _crawl(client, start, domain, field, field_terms, robots, deadline, max_pages):
@@ -146,12 +176,30 @@ async def _crawl(client, start, domain, field, field_terms, robots, deadline, ma
     return faculty
 
 
-async def _resolve_institution(client: httpx.AsyncClient, domain: str) -> dict | None:
+async def _resolve_institution(client: httpx.AsyncClient, url: str, domain: str) -> dict | None:
+    cached = await cache.get_json(f"inst:{domain}")
+    if cached:
+        return cached
+    # The homepage <title> ("University of Toronto") resolves far more reliably than
+    # a domain abbreviation ("utoronto"); the result is still verified by homepage.
+    title = await _homepage_title(client, url)
     labels = [l for l in domain.split(".") if l not in _GENERIC and l not in _CCTLDS]
-    name_hint = labels[-1].capitalize() if labels else domain
-    queries = [domain, " ".join(labels), *labels]
+    name_hint = title or (labels[-1].capitalize() if labels else domain)
+    queries = [q for q in [title, domain, " ".join(labels), *labels] if q]
     try:
-        return await openalex.find_institution_by_domain(client, domain, name_hint, queries)
+        inst = await openalex.find_institution_by_domain(client, domain, name_hint, queries)
+    except Exception:
+        return None
+    if inst:  # cache only successful resolutions, so a throttle-failure retries
+        await cache.set_json(f"inst:{domain}", inst, settings.cache_institution_ttl)
+    return inst
+
+
+async def _homepage_title(client: httpx.AsyncClient, url: str) -> str | None:
+    try:
+        r = await client.get(url, timeout=15)
+        m = re.search(r"<title[^>]*>(.*?)</title>", r.text, re.IGNORECASE | re.DOTALL)
+        return " ".join(m.group(1).split())[:100] if m else None
     except Exception:
         return None
 

@@ -14,6 +14,7 @@ dependencies = [
     "alembic>=1.13",
     "redis>=5.0",
     "arq>=0.26",
+    "google-cloud-tasks>=2.16",
     "httpx>=0.27",
     "tenacity>=8.4",
     "trafilatura>=1.10",

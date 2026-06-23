@@ -6,13 +6,17 @@ from app.services.gemini import generate_json
 
 _PROMPT = """A student is looking for a research supervisor.
 
-Student profile:
+The student's STATED research interests — score ONLY against these:
+{interests}
+
+Background context (use ONLY to phrase recommendations, never to score — ignore
+the student's generic skills, tools, and unrelated past projects):
 {profile}
 
-Candidate professors (JSON):
+Candidate professors with their recent work (JSON):
 {candidates}
 
-For EACH candidate, produce a final match assessment. Return ONLY JSON:
+For EACH candidate, return ONLY JSON:
 {{"matches": [
   {{"name": str,
     "match_score": float (0.0-1.0),
@@ -23,9 +27,13 @@ For EACH candidate, produce a final match assessment. Return ONLY JSON:
   }}
 ]}}
 
-Base alignment_reasons and shared_keywords on genuine overlap between the
-student's themes/methods and the professor's publications. recommendation_text
-is one or two sentences addressed to the student. Order by match_score desc.
+match_score rubric — judge the STATED interests against the professor's RECENT publications only:
+- 0.85-1.0: direct recent-publication evidence across the stated interest areas
+- 0.60-0.84: strong recent evidence in the primary stated interest
+- 0.40-0.59: adjacent / partial overlap
+- below 0.40: tangential, or overlap only on generic skills
+alignment_reasons and shared_keywords must cite genuine overlap with the stated
+interests. recommendation_text is one or two sentences to the student. Order by match_score desc.
 """
 
 
@@ -46,7 +54,9 @@ def _to_publication(pub: dict) -> dict:
     }
 
 
-async def run(profile_text: str, shortlist: list[dict], top_n: int = 10) -> list[dict]:
+async def run(
+    profile_text: str, shortlist: list[dict], top_n: int = 10, interests: str | None = None
+) -> list[dict]:
     shortlist = shortlist[:top_n]
     slim = [
         {
@@ -59,9 +69,11 @@ async def run(profile_text: str, shortlist: list[dict], top_n: int = 10) -> list
         for p in shortlist
     ]
     try:
-        result = await generate_json(
-            _PROMPT.format(profile=profile_text[:4000], candidates=json.dumps(slim))
-        )
+        result = await generate_json(_PROMPT.format(
+            interests=interests or profile_text,
+            profile=profile_text[:2000],
+            candidates=json.dumps(slim),
+        ))
         by_name = {m.get("name"): m for m in result.get("matches", [])}
     except Exception:
         # LLM re-rank failed — degrade to embedding-order results, scores via _score below.

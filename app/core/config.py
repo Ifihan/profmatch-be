@@ -21,6 +21,19 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     arq_queue_name: str = "arq:queue"  # set per deploy to isolate preview queues
 
+    # Background job backend: "arq" (Redis worker, dev/preview) | "cloudtasks" (prod push)
+    queue_backend: str = "arq"
+    cloud_tasks_project: str = ""
+    cloud_tasks_location: str = ""        # e.g. us-central1
+    cloud_tasks_queue: str = ""           # Cloud Tasks queue name
+    cloud_tasks_invoker_sa: str = ""      # service account email for the OIDC token
+    service_url: str = ""                 # this service's public URL (task target + OIDC audience)
+
+    # OpenAlex cache TTLs (seconds) — cut repeat-search API load and 429s
+    cache_institution_ttl: int = 30 * 24 * 3600
+    cache_professor_ttl: int = 30 * 24 * 3600
+    cache_recency_ttl: int = 14 * 24 * 3600
+
     gemini_api_key: str = ""
     gemini_gen_model: str = "gemini-2.5-flash"
     gemini_embed_model: str = "gemini-embedding-001"
