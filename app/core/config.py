@@ -1,0 +1,56 @@
+from functools import lru_cache
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    env: str = "development"
+    secret_key: str = "change-me"
+    access_token_expire_minutes: int = 15
+    refresh_token_expire_days: int = 14
+
+    # comma-separated allowed origins (credentialed CORS can't use "*")
+    cors_origins: str = "http://localhost:3000"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    database_url: str = "postgresql+asyncpg://profmatch:profmatch@localhost:5432/profmatch"
+    redis_url: str = "redis://localhost:6379/0"
+    arq_queue_name: str = "arq:queue"  # set per deploy to isolate preview queues
+
+    # Background job backend: "arq" (Redis worker, dev/preview) | "cloudtasks" (prod push)
+    queue_backend: str = "arq"
+    cloud_tasks_project: str = ""
+    cloud_tasks_location: str = ""        # e.g. us-central1
+    cloud_tasks_queue: str = ""           # Cloud Tasks queue name
+    cloud_tasks_invoker_sa: str = ""      # service account email for the OIDC token
+    service_url: str = ""                 # this service's public URL (task target + OIDC audience)
+
+    # OpenAlex cache TTLs (seconds) — cut repeat-search API load and 429s
+    cache_institution_ttl: int = 30 * 24 * 3600
+    cache_professor_ttl: int = 30 * 24 * 3600
+    cache_recency_ttl: int = 14 * 24 * 3600
+
+    gemini_api_key: str = ""
+    gemini_gen_model: str = "gemini-2.5-flash"
+    gemini_embed_model: str = "gemini-embedding-001"
+
+    openalex_mailto: str = ""
+    semantic_scholar_api_key: str = ""
+    crossref_mailto: str = ""
+
+    anon_free_searches: int = 1
+    registered_start_credits: int = 3
+    registered_max_credits: int = 3
+    credit_regen_interval_hours: int = 48
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()

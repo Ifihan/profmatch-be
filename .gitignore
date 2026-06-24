@@ -1,24 +1,12 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
-
-# Environment files
 .env
-.env.local
-.env.development
-.env.production
-
-# Uploads
-uploads/
-
-trd.md
-optimization.md
-
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
 .DS_Store
+
+# docs / spec — not tracked (README.md stays tracked)
+trd.md
+result.json

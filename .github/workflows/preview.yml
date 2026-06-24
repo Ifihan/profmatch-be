@@ -1,0 +1,86 @@
+name: PR Preview (Cloud Run)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+  id-token: write        # Workload Identity Federation
+  pull-requests: write   # comment the preview URL
+
+concurrency:
+  group: preview-${{ github.event.number }}
+  cancel-in-progress: true
+
+env:
+  SERVICE: profmatch-pr-${{ github.event.number }}
+  REGION: ${{ vars.GCP_REGION }}
+  PROJECT: ${{ vars.GCP_PROJECT_ID }}
+
+jobs:
+  deploy:
+    if: github.event.action != 'closed'
+    environment: preview
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build & push image
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/profmatch/api:pr-${{ github.event.number }}-${GITHUB_SHA::8}"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Deploy to Cloud Run
+        id: deploy
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+          CORS_ORIGINS: ${{ vars.CORS_ORIGINS }}
+        run: |
+          # ^##^ sets '##' as the delimiter so values containing commas/@/: are safe.
+          gcloud run deploy "$SERVICE" \
+            --image "$IMAGE" \
+            --region "$REGION" \
+            --platform managed \
+            --allow-unauthenticated \
+            --min-instances=1 --max-instances=1 --no-cpu-throttling \
+            --command=sh --args=deploy/cloudrun-entrypoint.sh \
+            --set-env-vars="^##^ENV=preview##ARQ_QUEUE_NAME=arq:${SERVICE}##CORS_ORIGINS=${CORS_ORIGINS}##OPENALEX_MAILTO=hello@ifihan.com##CROSSREF_MAILTO=hello@ifihan.com##GEMINI_API_KEY=${GEMINI_API_KEY}##DATABASE_URL=${DATABASE_URL}##REDIS_URL=${REDIS_URL}##SECRET_KEY=${SECRET_KEY}" \
+            --quiet
+          echo "url=$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')" >> "$GITHUB_OUTPUT"
+
+      - name: Comment preview URL
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const url = "${{ steps.deploy.outputs.url }}";
+            const body = `🚀 **Preview deployed** — ${url}/docs\n\nService: \`${{ env.SERVICE }}\` · commit ${context.sha.slice(0,8)}`;
+            const { data: comments } = await github.rest.issues.listComments({ ...context.repo, issue_number: context.issue.number });
+            const mine = comments.find(c => c.user.type === 'Bot' && c.body.includes('Preview deployed'));
+            if (mine) await github.rest.issues.updateComment({ ...context.repo, comment_id: mine.id, body });
+            else await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+
+  teardown:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Delete preview service
+        run: gcloud run services delete "$SERVICE" --region "$REGION" --quiet || true

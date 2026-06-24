@@ -1,0 +1,61 @@
+name: Deploy Prod (Cloud Run)
+
+# Manual, deliberate prod deploys. Add `push: { branches: [main] }` to auto-deploy on merge.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # Workload Identity Federation
+
+concurrency:
+  group: prod-deploy
+  cancel-in-progress: false
+
+env:
+  SERVICE: profmatchapi
+  REGION: ${{ vars.GCP_REGION }}
+  PROJECT: ${{ vars.GCP_PROJECT_ID }}
+
+jobs:
+  deploy:
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build & push image
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/profmatch/api:prod-${GITHUB_SHA::8}"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Deploy to Cloud Run
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+          CORS_ORIGINS: ${{ vars.CORS_ORIGINS }}
+        run: |
+          # Cloud Tasks backend: scale to zero (no worker), long request timeout for the
+          # in-request pipeline. ^##^ delimiter so values with commas/@/: are safe.
+          gcloud run deploy "$SERVICE" \
+            --image "$IMAGE" \
+            --region "$REGION" \
+            --platform managed \
+            --allow-unauthenticated \
+            --min-instances=0 --max-instances=10 --timeout=900 \
+            --command=sh --args=deploy/cloudrun-entrypoint.sh \
+            --set-env-vars="^##^ENV=production##QUEUE_BACKEND=cloudtasks##CLOUD_TASKS_PROJECT=${PROJECT}##CLOUD_TASKS_LOCATION=${REGION}##CLOUD_TASKS_QUEUE=profmatch-jobs##CLOUD_TASKS_INVOKER_SA=profmatch-tasks-invoker@build-with-vertex-ai.iam.gserviceaccount.com##SERVICE_URL=https://profmatchapi-912048666815.us-central1.run.app##CORS_ORIGINS=${CORS_ORIGINS}##OPENALEX_MAILTO=hello@ifihan.com##CROSSREF_MAILTO=hello@ifihan.com##GEMINI_API_KEY=${GEMINI_API_KEY}##DATABASE_URL=${DATABASE_URL}##REDIS_URL=${REDIS_URL}##SECRET_KEY=${SECRET_KEY}" \
+            --quiet
+          echo "Deployed: $(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')"
