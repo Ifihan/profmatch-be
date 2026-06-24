@@ -125,6 +125,85 @@ async def test_concurrent_redemption_respects_cap(client, make_user, track):
     assert sorted(x.status_code for x in rs) == [200, 409]
 
 
+async def _seed_job(uid: str, status=None) -> str:
+    from app.models import MatchJob, JobStatus
+    async with SessionLocal() as db:
+        job = MatchJob(
+            user_id=uid, university_url="http://u.edu", research_interests="x",
+            cv_text="cv", status=status or JobStatus.DONE, progress=100,
+        )
+        db.add(job)
+        await db.commit()
+        return job.id
+
+
+async def test_update_name(client, make_user):
+    uid = await make_user(starting_credits=2)
+    r = await client.patch("/api/auth/me", json={"name": "Renamed User"}, headers=_auth(uid))
+    assert r.status_code == 200 and r.json()["name"] == "Renamed User"
+    # persisted
+    assert (await client.get("/api/auth/me", headers=_auth(uid))).json()["name"] == "Renamed User"
+    # empty name rejected
+    assert (await client.patch("/api/auth/me", json={"name": ""}, headers=_auth(uid))).status_code == 422
+
+
+async def test_delete_one_search(client, make_user):
+    uid = await make_user(starting_credits=0)
+    job_id = await _seed_job(uid)
+    other = await make_user(starting_credits=0)
+
+    # a different user can't delete it
+    assert (await client.delete(f"/api/auth/me/searches/{job_id}", headers=_auth(other))).status_code == 404
+    # owner can
+    assert (await client.delete(f"/api/auth/me/searches/{job_id}", headers=_auth(uid))).status_code == 204
+    assert (await client.get(f"/api/auth/me/searches/{job_id}", headers=_auth(uid))).status_code == 404
+
+
+async def test_clear_history_only_terminal_and_own(client, make_user):
+    from app.models import JobStatus
+    uid = await make_user(starting_credits=0)
+    done = await _seed_job(uid)
+    active = await _seed_job(uid, status=JobStatus.RANKING)
+    other_job = await _seed_job(await make_user(starting_credits=0))
+
+    assert (await client.delete("/api/auth/me/searches", headers=_auth(uid))).status_code == 204
+
+    rows = (await client.get("/api/auth/me/searches", headers=_auth(uid))).json()
+    ids = {r["job_id"] for r in rows}
+    assert done not in ids        # finished search cleared
+    assert active in ids          # in-flight search untouched
+    # another user's history is unaffected
+    async with SessionLocal() as db:
+        from app.models import MatchJob
+        assert (await db.execute(select(MatchJob.id).where(MatchJob.id == other_job))).scalar_one_or_none() == other_job
+
+
+async def test_delete_account(client, make_user, track):
+    uid = await make_user(starting_credits=3)  # leaves a credit_events row
+    await _seed_job(uid)
+    other = await make_user(starting_credits=1)
+
+    # wrong password is rejected
+    assert (await client.request(
+        "DELETE", "/api/auth/me", json={"password": "wrong"}, headers=_auth(uid)
+    )).status_code == 401
+
+    r = await client.request(
+        "DELETE", "/api/auth/me", json={"password": "password123"}, headers=_auth(uid)
+    )
+    assert r.status_code == 204
+
+    # the user and all their rows are gone; the token no longer resolves
+    assert (await client.get("/api/auth/me", headers=_auth(uid))).status_code == 401
+    async with SessionLocal() as db:
+        from app.models import MatchJob, CreditEvent
+        assert (await db.execute(select(User.id).where(User.id == uid))).scalar_one_or_none() is None
+        assert (await db.execute(select(MatchJob.id).where(MatchJob.user_id == uid))).first() is None
+        assert (await db.execute(select(CreditEvent.id).where(CreditEvent.user_id == uid))).first() is None
+        # the other user is untouched
+        assert (await db.execute(select(User.id).where(User.id == other))).scalar_one() == other
+
+
 async def test_admin_requires_admin(client, make_user):
     u1 = await make_user(starting_credits=0)
     admin = await make_user(admin=True, starting_credits=0)
