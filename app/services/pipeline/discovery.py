@@ -199,9 +199,19 @@ async def _homepage_title(client: httpx.AsyncClient, url: str) -> str | None:
     try:
         r = await client.get(url, timeout=15)
         m = re.search(r"<title[^>]*>(.*?)</title>", r.text, re.IGNORECASE | re.DOTALL)
-        return " ".join(m.group(1).split())[:100] if m else None
+        return _institution_name(" ".join(m.group(1).split())[:120]) if m else None
     except Exception:
         return None
+
+
+def _institution_name(title: str) -> str:
+    """Pull the institution name out of a messy page title ("Homepage | University
+    of Bristol" -> "University of Bristol") by picking the most name-like segment."""
+    parts = [p.strip() for p in re.split(r"[|\-–—:·•]", title) if p.strip()]
+    for p in parts:
+        if any(w in p.lower() for w in ("univers", "college", "institut", "school", "polytechnic")):
+            return p
+    return max(parts, key=len) if parts else title
 
 
 async def _openalex_fallback(client, institution, university, field_terms) -> list[dict]:

@@ -57,20 +57,24 @@ def _homepage_host(inst: dict) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
 async def find_institution_by_domain(
     client: httpx.AsyncClient, domain: str, name_hint: str, queries: list[str]
 ) -> dict | None:
-    """Resolve an institution and verify it by homepage domain to avoid wrong-name matches."""
+    """Resolve an institution and verify it by homepage domain. Tries each query
+    independently so one bad/failed query (e.g. a junk title) doesn't abort the rest."""
     for q in dict.fromkeys([name_hint, *queries]):
+        q = (q or "").replace("|", " ").strip()  # '|' is OpenAlex's OR operator → 400
         if not q:
             continue
-        r = await _throttled(client.get(
-            f"{BASE}/institutions",
-            params={"search": q, "per_page": 5, "mailto": settings.openalex_mailto},
-            timeout=20,
-        ))
-        r.raise_for_status()
+        try:
+            r = await _throttled(client.get(
+                f"{BASE}/institutions",
+                params={"search": q, "per_page": 5, "mailto": settings.openalex_mailto},
+                timeout=20,
+            ))
+            r.raise_for_status()
+        except Exception:
+            continue
         for inst in r.json().get("results", []):
             host = _homepage_host(inst)
             if host and (host == domain or host.endswith("." + domain) or domain.endswith("." + host)):
