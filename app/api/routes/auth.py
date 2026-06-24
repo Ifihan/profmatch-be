@@ -15,11 +15,11 @@ from app.core.security import (
 from app.models import User, CreditEventType, MatchJob, JobStatus
 from app.schemas.auth import (
     SignupRequest, LoginRequest, ForgotPasswordRequest,
-    ResetPasswordRequest, RefreshRequest, TokenResponse,
-    MeResponse, SearchSummary,
+    ResetPasswordRequest, RefreshRequest, UpdateProfileRequest, DeleteAccountRequest,
+    TokenResponse, MeResponse, SearchSummary,
 )
 from app.schemas.match import JobStatusResponse, SearchDetailResponse
-from app.services import credits
+from app.services import account, credits
 
 logger = logging.getLogger("profmatch.auth")
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -117,6 +117,25 @@ async def me(db: AsyncSession = Depends(get_db), user: User = Depends(get_curren
     }
 
 
+@router.patch("/me", response_model=MeResponse)
+async def update_me(
+    body: UpdateProfileRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    user.name = body.name
+    balance = await credits.get_balance(db, user.id)
+    await db.commit()
+    return {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "is_admin": user.is_admin,
+        "created_at": user.created_at,
+        "credit_balance": balance,
+    }
+
+
 @router.get("/me/searches", response_model=list[SearchSummary])
 async def my_searches(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     jobs = (await db.execute(
@@ -155,3 +174,36 @@ async def my_search(
         research_interests=job.research_interests,
         created_at=job.created_at,
     )
+
+
+@router.delete("/me/searches/{search_id}", status_code=204)
+async def delete_search(
+    search_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    job = (await db.execute(
+        status_only(select(MatchJob).where(MatchJob.id == search_id))
+    )).scalar_one_or_none()
+    if job is None or job.user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Search not found")
+    await db.delete(job)
+    await db.commit()
+
+
+@router.delete("/me/searches", status_code=204)
+async def clear_searches(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    await account.clear_history(db, user.id)
+
+
+@router.delete("/me", status_code=204)
+@limiter.limit("3/minute")
+async def delete_account(
+    request: Request,
+    body: DeleteAccountRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not verify_password(body.password, user.password_hash):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect password")
+    await account.delete_account(db, user.id)

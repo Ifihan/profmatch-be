@@ -50,6 +50,20 @@ class ResetPasswordRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
+class UpdateProfileRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"name": "Ada Lovelace"}})
+
+    name: str = Field(min_length=1, max_length=120)
+
+
+class DeleteAccountRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {
+        "password": "ChangeMe_example123",
+    }})
+
+    password: str
+
+
 class RefreshRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={"example": {
         "refresh_token": "<paste the refresh token>",
